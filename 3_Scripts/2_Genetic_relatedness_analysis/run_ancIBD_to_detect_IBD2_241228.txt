@@ -1,0 +1,45 @@
+####################################
+## 2. Run ancIBD                                     ##
+####################################
+
+cd /data2/projects1/Koken/Koken_ML_1240K/analysis/ancIBD
+
+pt1=($(pwd)"/")
+
+scf=${pt1}"Run_ancIBD_to_detect_IBD2_241228.sh"
+fn1="Koken_ancIBD_ch"
+of1="Koken_ancIBD_IBD2"
+
+## Change the file names
+## I don't know why but only HDF5 with "ch" (not "chr") works.
+cd ./HDF5
+while read fn; do nfn=($(echo ${fn} | sed 's/chr/ch/g')); cp ${fn} ${nfn}; done < <(ls)
+cd ../
+
+## Submit the jobs
+## It only takes less than one minute per one chromosome
+chr=22
+nrun=6
+
+CMD1=${scf}" "${pt1}" "${fn1}" "${of1}
+sbatch --array=1-${chr}%${nrun} -c 8 --mem 15000 --wrap="$CMD1"
+
+## Summarize the results
+## It only takes less than one minute
+CMD2="ancIBD-summary --tsv "${pt1}output_IBD2"/"${of1}".ch --IBD2 --out "${pt1}"output_IBD2"
+sbatch -c 8 --mem 15000 --wrap="$CMD2"
+
+######################################################
+##  Save the following as "Run_ancIBD_to_detect_IBD2_241228.sh"  ## 
+
+#!/bin/bash
+
+path=$1
+fn1=$2
+of1=$3
+ch=$SLURM_ARRAY_TASK_ID
+
+ancIBD-run --h5 ${path}HDF5/${fn1}${ch}.h5 --out ${path}output_IBD2 --ch ${ch} \
+  --IBD2 --marker_path ${path}data/filters/snps_bcftools_ch${ch}.csv --map_path ${path}data/map/v51.1_1240k.snp \
+  --af_path ${path}data/afs/v51.1_1240k_AF_ch${ch}.tsv --prefix ${of1}
+
