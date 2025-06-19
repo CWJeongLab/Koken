@@ -1,0 +1,81 @@
+###############################################################################
+## Estimate the admixture dates of Koken individuals ##
+###############################################################################
+
+cd /data2/projects1/Koken/analysis/
+
+mkdir -p ./DATES_250425_2/; cd ./DATES_250425_2/
+
+pt1=($(pwd)"/")
+
+fn1="/data2/projects1/Koken/analysis/DATES_250425/Koken_dates_250425"
+admixlist="admixlist_250425_2.txt"
+npidl=${pt1}"new_pop_list.txt"
+of="Koken_dates_250425_2"
+parf=${of}".par"
+tn1="temp1_"${of}
+
+targets="Zevakinskiy_LBA Koken_MLBA_o1 Koken_MLBA_o2"
+ref1s="Krasnoyarsk_MLBA Sintashta_MLBA"
+ref2s="Irtysh_UpperOb_HG"
+
+## Extract individuals belonging to groups to be used
+## and update population IDs
+cp ${fn1}.geno ${of}.geno
+while read -r iid sex pid; do
+    pid2=($(awk -v iid="$iid" '{if ($1==iid) print $2}' ${npidl}))
+    if [[ "$pid2" != "" ]]; then pid=${pid2}; fi
+    echo -e ${iid}"\t"${sex}"\t"${pid} >> ${of}.ind
+done < ${fn1}.ind
+cp ${fn1}.snp ${of}.snp
+
+## Write an admixture combination list
+for tar in ${targets}; do 
+    for r1 in ${ref1s}; do for r2 in ${ref2s}; do
+        if [[ "$tar" == "$r1" ]]; then continue; fi
+        echo -e ${r1}"\t"${r2}"\t"${tar}"\ttest_"${tar}"."${r1}"_"${r2} >> ${pt1}${admixlist}
+    done; done
+done
+
+## Write a template for DATES parameter files
+echo 'genotypename: '${pt1}${of}'.geno' > ${parf}
+echo 'snpname: '${pt1}${of}'.snp' >> ${parf}
+echo 'indivname: '${pt1}${of}'.ind' >> ${parf}
+echo 'jackknife: YES' >> ${parf}
+echo 'binsize: 0.001' >> ${parf}
+echo 'maxdis: 0.5' >> ${parf}
+echo 'seed: 77' >> ${parf}
+echo 'runmode: 1' >> ${parf}
+echo 'chithresh: 0.0' >> ${parf}
+echo 'mincount: 1' >> ${parf}
+echo 'zdipcorrmode: YES' >> ${parf}
+echo 'qbin: 10' >> ${parf}
+echo 'runfit: YES' >> ${parf}
+echo 'afffit: YES' >> ${parf}
+echo 'lovalfit: 0.45' >> ${parf}
+echo 'checkmap: NO' >> ${parf}
+
+## Write admixlist file at the bottom of the parameter file
+echo 'admixlist: '${pt1}${admixlist} >> ${parf}
+
+## Run DATES
+sbatch -c 12 --mem 20000 --wrap="dates -p ${pt1}${parf} > ${of}.log"
+
+## Merge final output information into one file
+echo -e "Ref1\tRef2\tTarget\tMean\tStd.error\tZ\tCoef\tAffine" > ${of}_summary.txt
+while read -r r1 r2 tar test; do
+    n1=($(awk '{if ($1 == "mean") print $3}'  ${pt1}${test}/${tar}"_expfit.log"))
+    n2=($(awk '{print $5}' ${pt1}${test}/${tar}".jout"))
+    n3=($(awk '{print $7}' ${pt1}${test}/${tar}".jout"))
+    n4=($(grep -A 1 mean ${pt1}${test}/${tar}"_expfit.log" | tail -1 | awk '{print $1}'))
+    n5=($(grep -A 1 mean ${pt1}${test}/${tar}"_expfit.log" | tail -1 | awk '{print $2}'))
+    echo -e ${r1}"\t"${r2}"\t"${tar}"\t"${n1}"\t"${n2}"\t"${n3}"\t"${n4}"\t"${n5} >> ${pt1}${of}_summary.txt  
+done < <(cat ${pt1}${admixlist})
+
+## Remove temp and slurm file
+rm ${tn1}*; rm slurm-*.out
+
+for p1 in ${targets}; do while read fn; do
+    of1=($(echo ${fn} | cut -d / -f 1 | rev | cut -d . -f 1 | rev))
+    cp ${fn} ./${p1}.${of1}.txt
+done < <(ls test_${p1}.*/${p1}.out); done

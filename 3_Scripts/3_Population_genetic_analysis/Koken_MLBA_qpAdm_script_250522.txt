@@ -1,0 +1,283 @@
+################################################################################
+## 1. Prepare genotype data used for the qpWave/qpAdm analysis of Koken_MLBA  ##
+##    Take one removed Sintashta_MLBA (I1003) back to the analysis            ##
+##    Add Villabruna clusters ##
+################################################################################
+
+cd /data2/projects1/Koken/analysis/genotypes/
+
+pt1=($(pwd)"/")
+fn1="/data2/projects1/Koken/analysis/genotypes/Koken_MLBA.qpAdm.1240K.250305"
+fn2="/data2/PubData/Posth2023Nature/analysis/genotypes/Posth2023Nature"
+fn3="/data2/PubData/Lazaridis2025Nature/analysis/genotypes/Lazaridis2025Nature"
+epopsf=${pt1}"EEHGpops.list"
+of1="Koken_MLBA.qpAdm.1240K.250522"
+tn1="temp1_"${of1}
+
+## Extract Villabruna cluster individuals
+cn1s=""; while read cn1; do
+    if [[ "$cn1s" == "" ]]; then cn1s=${cn1}; else cn1s+=","${cn1}; fi
+done < <(grep -E "AC16|PRD001|RIP001|STO001" ${fn2}.ind -n | cut -d : -f 1)
+cut -c ${cn1s} ${fn2}.geno > ${tn1}_1.geno
+grep -E "AC16|PRD001|RIP001|STO001" ${fn2}.ind | awk '{OFS="\t"} {if ($3 ~ /pmd/) print $1,$2,$3; else print $1,$2,"Villabruna"}' > ${tn1}_1.ind
+
+## Extract EEHG-related individuals
+cn1s=""; while read cn1; do
+    if [[ "$cn1s" == "" ]]; then cn1s=${cn1}; else cn1s+=","${cn1}; fi
+done < <(fgrep -wf ${epopsf} ${fn3}.ind -n | cut -d : -f 1)
+cut -c ${cn1s} ${fn3}.geno > ${tn1}_2.geno
+fgrep -wf ${epopsf} ${fn3}.ind > ${tn1}_2.ind
+
+## Merge data set
+paste ${fn1}.geno ${tn1}_1.geno ${tn1}_2.geno -d '' > ${of1}.geno
+cat ${fn1}.ind ${tn1}_1.ind ${tn1}_2.ind > ${of1}.ind
+cp ${fn1}.snp ${of1}.snp
+
+## Reformat data into binary PLINK format
+echo "genotypename: "${pt1}${of1}".geno" > ${tn1}_1.par
+echo "snpname: "${pt1}${of1}".snp" >> ${tn1}_1.par
+echo "indivname: "${pt1}${of1}".ind" >> ${tn1}_1.par
+echo "outputformat: PACKEDPED" >> ${tn1}_1.par
+echo "genooutfilename: "${pt1}${tn1}"_1.bed" >> ${tn1}_1.par
+echo "snpoutfilename: "${pt1}${tn1}"_1.pedsnp" >> ${tn1}_1.par
+echo "indoutfilename: "${pt1}${tn1}"_1.pedind" >> ${tn1}_1.par
+
+convertf -p ${tn1}_1.par
+
+awk '{OFS="\t"} {print $1,$2,$3,$4,$5,$6}' ${tn1}_1.pedsnp > ${tn1}_1.bim
+awk '{if ($2 == "M") print $3,$1,"0 0 1 2"; else if ($2 == "F") print $3,$1,"0 0 2 2";
+      else print $3,$1,"0 0 0 2"}' ${of1}.ind > ${tn1}_1.fam
+
+## Rename the files
+for K in bed bim fam; do cp ${tn1}_1.${K} ${of1}.${K}; done
+
+## Prepare the second set of genotype data for individual outlier modeling
+awk '{if (($1 ~ /_o/ && $1 !~ /Koken/) || $1 ~ /^Prio/ || $1 ~ /^Zeva/) print $2,$2,$3,$4,$5,$6;
+      else print $1,$2,$3,$4,$5,$6}' ${of1}.fam > ${of1}.2.fam
+cp ${of1}.bed ${of1}.2.bed
+cp ${of1}.bim ${of1}.2.bim
+
+## Remove temporary files
+rm ${tn1}_*
+
+
+
+
+######################################################
+## 2. Run qpAdm for Koken_MLBA using admixtools2    ##
+######################################################
+
+cd /data2/projects1/Koken/analysis/genotypes/
+
+R
+
+rm(list=ls())
+setwd("/data2/projects1/Koken/analysis/genotypes/")
+
+library(admixtools)
+library(dplyr)
+
+fn1 = "Koken_MLBA.qpAdm.1240K.250522.2"
+
+indf = read.table(paste(fn1, ".fam", sep=""), header=F)
+allpops = sort(unique(as.vector(as.matrix(indf[,1]))))
+
+rp1s = c("Mbuti.DG", "Ami.DG", "Onge.DG", "Mixe.DG", "Iran_N", "Villabruna", "Anatolia_N")
+rp2s = c("Mbuti.DG", "Ami.DG", "Onge.DG", "Mixe.DG", "Iran_N", "Villabruna", "Anatolia_N", "Tarim_EMBA1", "UOO_M", "WestBaikal_LNBA")
+rp3s = c("Mbuti.DG", "Ami.DG", "Onge.DG", "Mixe.DG", "Iran_N", "Villabruna", "Anatolia_N", "Tarim_EMBA1")
+rp4s = c("Mbuti.DG", "Ami.DG", "Onge.DG", "Mixe.DG", "Iran_N", "Villabruna", "Anatolia_N", "Mergen6_HG")
+rp5s = c("Mbuti.DG", "Ami.DG", "Onge.DG", "Mixe.DG", "Iran_N", "Villabruna", "Anatolia_N", "BZK002")
+
+## qpWave for Koken_MLBA
+lp1s = c("Koken_MLBA", "Krasnoyarsk_MLBA", "Sintashta_MLBA")
+m101s = list()
+f2 <- f2_from_geno(fn1, pops=c(rp1s, lp1s[-3]), maxmiss=0, poly_only=F); m101s[[1]] = qpwave(f2, left=lp1s[-3], right=rp1s)
+f2 <- f2_from_geno(fn1, pops=c(rp1s, lp1s[-2]), maxmiss=0, poly_only=F); m101s[[2]] = qpwave(f2, left=lp1s[-2], right=rp1s)
+f2 <- f2_from_geno(fn1, pops=c(rp1s, lp1s[-1]), maxmiss=0, poly_only=F); m101s[[3]] = qpwave(f2, left=lp1s[-1], right=rp1s)
+
+p101s = unlist(lapply(m101s, function(x) { x$rankdrop$p }))
+
+
+#####################################################################
+## Proximal admixture modeling of Koken_MLBA and Krasnoyarsk_MLBA  ##
+
+## A list of the second source
+lp2s = c("Mergen6_HG", "Sosnoviy_HG", "Botai_Eneolithic", "Omskaya_HG", "Borovjanka17_HG", 
+         "Vengerovo2_HG", "Protoka_HG", "Koken_EN2", "Koken_EN1", "Altai_7500BP", 
+         "Altai_6500BP", "Altai_5500BP", "Itkul_HG", "UstIsha_HG", "BZK002", "DolgoeOzero_HG")
+
+m201s = lapply(lp2s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp2s, "Sintashta_MLBA", x, "Koken_MLBA"), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Sintashta_MLBA", x), right=rp2s, target="Koken_MLBA") })
+m202s = lapply(lp2s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp2s, "Sintashta_MLBA", x, "Krasnoyarsk_MLBA"), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Sintashta_MLBA", x), right=rp2s, target="Krasnoyarsk_MLBA") })
+
+## Extract p-value, coefficients, and SEs for Koken_MLBA
+c201s = cbind(unlist(lapply(m201s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m201s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=4, byrow=T))
+
+## Extract p-value, coefficients, and SEs for Krasnoyarsk_MLBA
+c202s = cbind(unlist(lapply(m202s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m202s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=4, byrow=T))
+
+
+#####################################################
+## Run proximal qpAdm modeling for outlier set 1   ##
+
+## Including two individuals that Haechan excluded: I1020 (Sintashta_MLBA_o2), I6792 (Maitan_MLBA_Alakul_o)
+tp3s = c("I1057", "I1028", "I1017", "I1007", "I0983", "I0980", "I1020", "I6792")
+
+## Proximal qpAdm models for each individual
+m301s = lapply(tp3s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp1s, "Sintashta_MLBA", "Mergen6_HG", x), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Sintashta_MLBA", "Mergen6_HG"), right=rp1s, target=x)}) 
+m302s = lapply(tp3s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp1s, "Sintashta_MLBA", "Mergen6_HG", "Geoksyur_EN", x), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Sintashta_MLBA", "Mergen6_HG", "Geoksyur_EN"), right=rp1s, target=x)}) 
+
+## Extract p-value, coefficients, and SEs for model 1
+c301s = cbind(unlist(lapply(m301s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m301s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=4, byrow=T))
+
+## Extract p-value, coefficients, and SEs for model 2
+c302s = cbind(unlist(lapply(m302s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m302s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=6, byrow=T))
+
+## save.image(file = paste(fn1, ".Rdata", sep=""))
+
+#####################################################
+## Run proximal qpAdm modeling for outlier set 2   ##
+
+## Including two individuals that Haechan excluded: I1020 (Sintashta_MLBA_o2), I6792 (Maitan_MLBA_Alakul_o)
+tp4s = c("I6795", "Koken_MLBA_o1", "I6717", "I6047", "I4566", "I4780", "I3772", "I4295", 
+         "I3977", "I3753", "I3763", "I3976", "I4267", "Koken_MLBA_o2", "I1020", "I6792")
+
+## Proximal qpAdm models for each individual
+m401s = lapply(tp4s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp1s, "Koken_MLBA", "Mergen6_HG", x), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Koken_MLBA", "Mergen6_HG"), right=rp1s, target=x)}) 
+m402s = lapply(tp4s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp1s, "Koken_MLBA", "Mergen6_HG", "Geoksyur_EN", x), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Koken_MLBA", "Mergen6_HG", "Geoksyur_EN"), right=rp1s, target=x)}) 
+m403s = lapply(tp4s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp3s, "Koken_MLBA", "Mergen6_HG", x), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Koken_MLBA", "Mergen6_HG"), right=rp3s, target=x)}) 
+m404s = lapply(tp4s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp3s, "Koken_MLBA", "Mergen6_HG", "Geoksyur_EN", x), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Koken_MLBA", "Mergen6_HG", "Geoksyur_EN"), right=rp3s, target=x)}) 
+m405s = lapply(tp4s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp1s, "Koken_MLBA", "BZK002", x), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Koken_MLBA", "BZK002"), right=rp1s, target=x)}) 
+m406s = lapply(tp4s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp1s, "Koken_MLBA", "BZK002", "Geoksyur_EN", x), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Koken_MLBA", "BZK002", "Geoksyur_EN"), right=rp1s, target=x)}) 
+m407s = lapply(tp4s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp3s, "Koken_MLBA", "BZK002", x), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Koken_MLBA", "BZK002"), right=rp3s, target=x)}) 
+m408s = lapply(tp4s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp3s, "Koken_MLBA", "BZK002", "Geoksyur_EN", x), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Koken_MLBA", "BZK002", "Geoksyur_EN"), right=rp3s, target=x)}) 
+m409s = lapply(tp4s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp1s, "Koken_MLBA", "Koken_EN1", x), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Koken_MLBA", "Koken_EN1"), right=rp1s, target=x)}) 
+m410s = lapply(tp4s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp1s, "Koken_MLBA", "Koken_EN1", "Geoksyur_EN", x), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Koken_MLBA", "Koken_EN1", "Geoksyur_EN"), right=rp1s, target=x)}) 
+m411s = lapply(tp4s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp3s, "Koken_MLBA", "Koken_EN1", x), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Koken_MLBA", "Koken_EN1"), right=rp3s, target=x)}) 
+m412s = lapply(tp4s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp3s, "Koken_MLBA", "Koken_EN1", "Geoksyur_EN", x), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Koken_MLBA", "Koken_EN1", "Geoksyur_EN"), right=rp3s, target=x)}) 
+
+## Extract p-value, coefficients, and SEs for model 1
+c401s = cbind(unlist(lapply(m401s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m401s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=4, byrow=T))
+
+## Extract p-value, coefficients, and SEs for model 2
+c402s = cbind(unlist(lapply(m402s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m402s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=6, byrow=T))
+
+## Extract p-value, coefficients, and SEs for model 3
+c403s = cbind(unlist(lapply(m403s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m403s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=4, byrow=T))
+
+## Extract p-value, coefficients, and SEs for model 4
+c404s = cbind(unlist(lapply(m404s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m404s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=6, byrow=T))
+
+## Extract p-value, coefficients, and SEs for model 5
+c405s = cbind(unlist(lapply(m405s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m405s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=4, byrow=T))
+
+## Extract p-value, coefficients, and SEs for model 6
+c406s = cbind(unlist(lapply(m406s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m406s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=6, byrow=T))
+
+## Extract p-value, coefficients, and SEs for model 7
+c407s = cbind(unlist(lapply(m407s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m407s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=4, byrow=T))
+
+## Extract p-value, coefficients, and SEs for model 8
+c408s = cbind(unlist(lapply(m408s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m408s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=6, byrow=T))
+
+## Extract p-value, coefficients, and SEs for model 9
+c409s = cbind(unlist(lapply(m409s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m409s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=4, byrow=T))
+
+## Extract p-value, coefficients, and SEs for model 10
+c410s = cbind(unlist(lapply(m410s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m410s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=6, byrow=T))
+
+## Extract p-value, coefficients, and SEs for model 11
+c411s = cbind(unlist(lapply(m411s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m411s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=4, byrow=T))
+
+## Extract p-value, coefficients, and SEs for model 12
+c412s = cbind(unlist(lapply(m412s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m412s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=6, byrow=T))
+
+
+######################################
+## Extra modeling of some outliers  ##
+
+m501s = list()
+f2 <- f2_from_geno(fn1, pops=c(rp4s, "Koken_MLBA", "BZK002", "Koken_MLBA_o1"), maxmiss=0, poly_only=F)
+m501s[[1]] = qpadm(f2, left=c("Koken_MLBA", "BZK002"), right=rp4s, target="Koken_MLBA_o1")
+f2 <- f2_from_geno(fn1, pops=c(rp5s, "Koken_MLBA", "Mergen6_HG", "Koken_MLBA_o1"), maxmiss=0, poly_only=F)
+m501s[[2]] = qpadm(f2, left=c("Koken_MLBA", "Mergen6_HG"), right=rp5s, target="Koken_MLBA_o1")
+f2 <- f2_from_geno(fn1, pops=c(rp1s, "Koken_MLBA", "irk030", "I3772"), maxmiss=0, poly_only=F)
+m501s[[3]] = qpadm(f2, left=c("Koken_MLBA", "irk030"), right=rp1s, target="I3772")
+f2 <- f2_from_geno(fn1, pops=c(rp3s, "Koken_MLBA", "irk030", "I3772"), maxmiss=0, poly_only=F)
+m501s[[4]] = qpadm(f2, left=c("Koken_MLBA", "irk030"), right=rp3s, target="I3772")
+f2 <- f2_from_geno(fn1, pops=c(rp1s, "Koken_MLBA", "DolgoeOzero_HG", "I3772"), maxmiss=0, poly_only=F)
+m501s[[5]] = qpadm(f2, left=c("Koken_MLBA", "DolgoeOzero_HG"), right=rp1s, target="I3772")  ## NEO292 = DolgoeOzero_HG
+f2 <- f2_from_geno(fn1, pops=c(rp3s, "Koken_MLBA", "DolgoeOzero_HG", "I3772"), maxmiss=0, poly_only=F)
+m501s[[6]] = qpadm(f2, left=c("Koken_MLBA", "DolgoeOzero_HG"), right=rp3s, target="I3772")
+
+## Extract p-value, coefficients, and SEs
+c501s = cbind(unlist(lapply(m501s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m501s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=4, byrow=T))
+
+
+
+## Save the results into .RData file
+## that can be later loaded with load(file)
+save.image(file = paste(fn1, ".Rdata", sep=""))
+
+
+
+######################################################################
+## To show that Koken_EN2 is the better proxy for central steppe MLBA than Koken_EN1 ##
+## due to its lower affinity with APS and higher affinity with EEHG                               ##
+## I ran qpAdm models for the three-way mixture of Sintashta_MLBA+Koken_EN1+UKY  ##
+##                                                                 Sintashta_MLBA+Koken_EN1+UOO_M ##
+######################################################################
+
+load("Koken_MLBA.qpAdm.1240K.250522.2.Rdata")
+
+tps = c("Koken_MLBA", "Krasnoyarsk_MLBA")
+rp2s_removed = rp2s[rp2s != "UOO_M"]
+
+
+m201s_added = lapply(tps, function(x) { qpadm(fn1, left=c("Sintashta_MLBA", "Koken_EN1", "irk030"), right=rp2s, target=x) })
+m202s_added = lapply(tps, function(x) { qpadm(fn1, left=c("Sintashta_MLBA", "Koken_EN1", "UOO_M"), right=rp2s_removed, target=x) })
+m202s_added_2 = lapply(tps, function(x) { qpadm(fn1, left=c("Sintashta_MLBA", "Koken_EN1", "Mergen6_HG"), right=rp2s, target=x) })
+
+## Extract p-value, coefficients, and SEs for UKY model
+c201s_added = cbind(unlist(lapply(m201s_added, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m201s_added, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=6, byrow=T))
+
+## Extract p-value, coefficients, and SEs for UOO_M model
+c202s_added = cbind(unlist(lapply(m202s_added, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m202s_added, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=6, byrow=T))
+
+## Extract p-value, coefficients, and SEs for UOO_M model
+c202s_added_2 = cbind(unlist(lapply(m202s_added_2, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m202s_added_2, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=6, byrow=T))

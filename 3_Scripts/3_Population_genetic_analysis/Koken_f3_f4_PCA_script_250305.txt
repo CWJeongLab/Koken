@@ -1,0 +1,246 @@
+#######################################################################################
+## 1. Extract ancient and present-day individuals included in the 1240K f3/f4 tests  ##
+##    From the run of 241226, extra steppe MLBA individuals                          ##
+##    from Narasimhan et al 2019 were added (n=39)                                   ##
+##    and one Sintashta_MLBA individual (I1003) was back to the analysis             ##
+#######################################################################################
+
+cd /data2/projects1/Koken/analysis/genotypes/
+
+pt1=($(pwd)"/")
+fn1="Koken.fstat.1240K.241230"
+fn2="Koken.1240K.250304"
+of1="Koken.fstat.1240K.250305"
+tn1="temp1_"${of1}
+
+## Remove Koken individuals from the previous round
+## and add new Koken individuals
+cn1s=""; while read cn; do
+    if [[ "$cn1s" == "" ]]; then cn1s+=${cn}; else cn1s+=","${cn}; fi
+done < <(grep -n KKN ${fn1}.ind | cut -d : -f 1)
+
+cut --complement -c ${cn1s} ${fn1}.geno | paste - ${fn2}.geno -d '' > ${of1}.geno
+grep -v KKN ${fn1}.ind | cat - ${fn2}.ind > ${of1}.ind
+cp ${fn1}.snp ${of1}.snp
+
+## Reformat data into binary PLINK format
+echo "genotypename: "${pt1}${of1}".geno" > ${tn1}_1.par
+echo "snpname: "${pt1}${of1}".snp" >> ${tn1}_1.par
+echo "indivname: "${pt1}${of1}".ind" >> ${tn1}_1.par
+echo "outputformat: PACKEDPED" >> ${tn1}_1.par
+echo "genooutfilename: "${pt1}${tn1}"_1.bed" >> ${tn1}_1.par
+echo "snpoutfilename: "${pt1}${tn1}"_1.pedsnp" >> ${tn1}_1.par
+echo "indoutfilename: "${pt1}${tn1}"_1.pedind" >> ${tn1}_1.par
+
+convertf -p ${tn1}_1.par
+
+awk '{OFS="\t"} {print $1,$2,$3,$4,$5,$6}' ${tn1}_1.pedsnp > ${tn1}_1.bim
+awk '{if ($2 == "M") print $3,$1,"0 0 1 2"; else if ($2 == "F") print $3,$1,"0 0 2 2";
+      else print $3,$1,"0 0 0 2"}' ${of1}.ind > ${tn1}_1.fam
+
+## Rename the files
+for K in bed bim fam; do cp ${tn1}_1.${K} ${of1}.${K}; done
+
+## Remove temporary files
+rm ${tn1}_*
+
+
+
+###################################################################
+## 2. Calculate f3 and f4 statistics using admixtools2           ##
+###################################################################
+
+cd /data2/projects1/Koken/analysis/genotypes/
+
+pt1=($(pwd)"/")
+fn1="Koken.fstat.1240K.250305"
+ilf1="Koken.fstat.pub.ancients.list.250305.txt"  ## A list of published ancient individuals included in f3/f4
+ilf2="Koken.fstat.pub.modern.list.250305.txt"
+f3plf="Koken.fstat.f3poplist.250305.txt"
+f4plf="Koken.fstat.f4poplist.250305.txt"
+tn1="temp1_Koken_fstat"
+
+og="Mbuti.DG"
+f3targets="Koken_EN1 Koken_EN2 Koken_MLBA Koken_MLBA_o1 Koken_MLBA_o2"
+f4targets="Koken_EN1,Koken_EN2 Koken_MLBA,Krasnoyarsk_MLBA Sintashta_MLBA,Koken_MLBA"
+f4targets+=" Sintashta_MLBA,Krasnoyarsk_MLBA Koken_MLBA,Koken_MLBA_o1 Koken_MLBA,Koken_MLBA_o2"
+
+## First, extract the list of ancient and present-day populations used for f3/f4
+## Add Koken groups to the list of ancients
+awk '{print $2}' ${ilf1} | uniq > ${tn1}_1_1        ## ancients
+echo ${f3targets} | sed s/" "/"\n"/g >> ${tn1}_1_1
+sort -k1,1 ${tn1}_1_1 > ${tn1}_1
+awk '{print $2}' ${ilf2} | sort -k1,1 | uniq >> ${tn1}_1  ## modern
+
+## Write all combinations of (Mbuti.DG, world-wide, Koken)
+for p3 in $(echo ${f3targets}); do
+    awk -v og="$og" -v p3="$p3" '{if ($1 != og && $1 != p3) print og,$1,p3}' ${tn1}_1 >> ${f3plf}
+done
+
+## Write all combinations of (Mbuti.DG, world-wide, target1, target2)
+for p34 in $(echo ${f4targets}); do
+    p3=($(echo ${p34} | sed s/","/" "/g | awk '{print $1}'))
+    p4=($(echo ${p34} | sed s/","/" "/g | awk '{print $2}'))
+    awk -v og="$og" -v p3="$p3" -v p4="$p4" '{if ($1 != og && $1 != p3 && $1 != p4) print og,$1,p3,p4}' ${tn1}_1 >> ${f4plf}
+done
+
+## Remove temporary files
+rm ${tn1}_*
+
+#####################################################
+## Now, run f3 and f4 in R                         ##
+
+R
+
+rm(list=ls())
+setwd("/data2/projects1/Koken/analysis/genotypes/")
+
+library(admixtools)
+library(dplyr)
+
+fn1 = "Koken.fstat.1240K.250305"
+f3plf = "Koken.fstat.f3poplist.250305.txt"
+f4plf = "Koken.fstat.f4poplist.250305.txt"
+
+indf = read.table(paste(fn1, ".fam", sep=""), header=F)
+allpops = sort(unique(as.vector(as.matrix(indf[,1]))))
+
+f3pops = as.matrix(read.table(f3plf, header=F))
+f4pops = as.matrix(read.table(f4plf, header=F))
+
+## Calculate f3 statistics for all combinations
+f3.dat = qp3pop(fn1, pop1 = f3pops, poly_only=F, blgsize=0.05, verbose=T)
+
+f3.dat2 = data.frame(f3.dat$pop1, f3.dat$pop2, f3.dat$pop3, f3.dat$est, f3.dat$se, f3.dat$z, f3.dat$n)
+names(f3.dat2) = c("Pop1", "Pop2", "Pop3", "f3.est", "se", "z", "nSNPs")
+write.table(file = "Koken.f3.1240K.250305.txt", f3.dat2, row.names=F, col.names=T)
+
+## Calculate f4 statistics for all combinations
+f4.dat = qpdstat(fn1, pop1 = f4pops, poly_only=F, blgsize=0.05, verbose=T)
+
+f4.dat2 = data.frame(f4.dat$pop1, f4.dat$pop2, f4.dat$pop3, f4.dat$pop4, 
+                     f4.dat$est, f4.dat$se, f4.dat$z, f4.dat$n)
+names(f4.dat2) = c("Pop1", "Pop2", "Pop3", "Pop4", "f4.est", "se", "z", "nSNPs")
+write.table(file = "Koken.f4.1240K.250305.txt", f4.dat2, row.names=F, col.names=T)
+
+## Save the results into .RData file
+## that can be later loaded with load(file)
+save.image(file = paste(fn1, ".Rdata", sep=""))
+
+quit()
+
+
+## FROM HERE!
+## All the added individuals were already in the 1240KHO data set (so in PCA)
+## So I did not do the following steps
+
+############################################################
+## 3. Prepare HumanOrigins genotype data for running PCA  ##
+############################################################
+
+cd /data2/projects1/Koken/analysis/genotypes/
+
+pt1=($(pwd)"/")
+fn1="/data2/projects1/Koken/analysis/genotypes/Koken.PCA.1240KHO.241226"
+fn2="Koken.fstat.1240K.241230"
+of1="Koken.PCA.1240KHO.241230"
+tn1="temp1_"${of1}
+
+## Check the individuals not yet included in the master data set
+while read iid; do
+    awk -v iid="$iid" '$1 == iid' ${fn1}.ind | wc -l >> ${tn1}_0_0
+done < <(awk '{print $1}' ${fn2}.ind)
+
+## Mark modern .DG individuals from the 1240K data set
+awk '{if ($1 ~ /.DG$/ && $3 !~ /WHG/ && $3 !~ /Ust_Ishim/) print 0; else print 1}' ${fn2}.ind > ${tn1}_0_1
+
+paste ${tn1}_0_0 ${tn1}_0_1 | awk '{if ($1 == 0 && $2 == 1) print 1; else print 0}' > ${tn1}_0
+
+## Check the overlap between the two data sets
+while read iid; do
+    awk -v iid="$iid" '$1 == iid' ${fn2}.ind | wc -l >> ${tn1}_1
+done < <(awk '{print $1}' ${fn1}.ind)
+
+## Extract column numbers
+tnum1s=""; while read tnum1; do
+    if [[ "$tnum1s" == "" ]]; then tnum1s+=${tnum1}; else tnum1s+=","${tnum1}; fi
+done < <(awk '{if ($1 == 0) print NR}' ${tn1}_1)
+
+## Remove overlapping samples from the master 1240KHO genotype data
+cut -c ${tnum1s} ${fn1}.geno > ${tn1}_1.geno
+
+## Produce .ind file
+paste ${tn1}_1 ${fn1}.ind | awk '{if ($1 == 0) print $2,$3,$4}' > ${tn1}_1.ind
+paste ${tn1}_1 ${fn1}.original.ind | awk '{if ($1 == 0) print $2,$3,$4}' > ${tn1}_1.original.ind
+
+## Mark modern .DG individuals from the 1240K data set
+awk '{if ($1 ~ /.DG$/ && $3 !~ /WHG/ && $3 !~ /Ust_Ishim/) print 0; else print 1}' ${fn2}.ind > ${tn1}_2
+
+## Extract column numbers
+tnum1s=""; while read tnum1; do
+    if [[ "$tnum1s" == "" ]]; then tnum1s+=${tnum1}; else tnum1s+=","${tnum1}; fi
+done < <(awk '{if ($1 == 1) print NR}' ${tn1}_2)
+
+## Remove modern .DG individuals from the 1240K data set
+cut -c ${tnum1s} ${fn2}.geno > ${tn1}_2_1.geno
+
+## Keep the HO SNPs
+awk '{print $1}' ${fn1}.snp > ${tn1}_2_1
+paste ${fn2}.snp ${tn1}_2_1.geno | fgrep -wf ${tn1}_2_1 - | awk '{print $7}' > ${tn1}_2.geno
+paste ${fn2}.snp ${tn1}_2_1.geno | fgrep -wf ${tn1}_2_1 - | awk '{OFS="\t"} {print $1,$2,$3,$4,$5,$6}' > ${tn1}_2.snp
+paste ${tn1}_2 ${fn2}.ind | awk '{OFS="\t"} {if ($1 == 1) print $2,$3,$4}' > ${tn1}_2.ind
+
+## Merge the two data sets
+paste ${tn1}_1.geno ${tn1}_2.geno -d '' > ${of1}.geno
+cat ${tn1}_1.ind ${tn1}_2.ind > ${of1}.ind
+cat ${tn1}_1.original.ind ${tn1}_2.ind > ${of1}.original.ind
+cp ${fn1}.snp ${of1}.snp
+
+rm ${tn1}_*
+
+
+##################################################################
+## 4. Run PCA                                                   ##
+##################################################################
+
+cd /data2/projects1/Koken/analysis/
+
+mkdir -p ./PCA_241230/; cd ./PCA_241230/
+
+pt1=($(pwd)"/")
+fn1="/data2/projects1/Koken/analysis/genotypes/Koken.PCA.1240KHO.241230"
+fn2="/data1/PubData/Jeong2020Cell/analysis/PCA_201022/PCA_201022"
+of1="PCA_241230"
+tn1="temp1_"${of1}
+
+nset=($(ls ${fn2}_*.pops | wc -l))
+for K in $(seq 1 $nset); do cp ${fn2}_${K}.pops ${of1}_${K}.pops; done
+
+## Write down parameter files
+nset=($(ls ${of1}_*.pops | wc -l))
+for K in $(seq 1 $nset); do
+    of2=${of1}"_"${K}; parf=${of2}".par"
+    echo "genotypename: "${fn1}".geno" > ${parf}
+    echo "snpname: "${fn1}".snp" >> ${parf}
+    if [ "$K" -lt "$nset" ]; then
+        echo "indivname: "${fn1}".original.ind" >> ${parf}
+    else
+        echo "indivname: "${fn1}".ind" >> ${parf}
+    fi
+    echo "evecoutname: "${pt1}${of2}".evec" >> ${parf}
+    echo "evaloutname: "${pt1}${of2}".eval" >> ${parf}
+    echo "poplistname: "${pt1}${of2}".pops" >> ${parf}
+    echo -e "altnormstype: NO\nnumoutevec: 20\nnumoutlieriter: 0\nnumoutlierevec: 0" >> ${parf}
+    echo -e "outliersigmathresh: 6.0\nnumthreads: 8\nqtmode: 0\nlsqproject: YES" >> ${parf}
+done
+
+## Run smartpca
+for K in $(seq 1 $nset); do
+    of2=${of1}"_"${K}
+    sbatch -c 8 --mem 15000 --wrap="smartpca -p "${of2}".par > "${of2}".log"
+done
+
+## Reformat output and remove unnecessary files
+eigenstrat_output_trimmer_160222.py ${of1} ${nset}
+rm ${of1}_*.log; rm slurm-*
+

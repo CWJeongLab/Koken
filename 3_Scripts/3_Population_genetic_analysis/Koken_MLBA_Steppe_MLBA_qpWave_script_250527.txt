@@ -1,0 +1,178 @@
+################################################################################
+## 1. Prepare genotype data used for the qpWave analysis of Koken_MLBA  ##
+##    Central_Steppe_MLBA and Western_Steppe_MLBA from Narasimhan et al. 2019 was used ##
+################################################################################
+
+cd /data2/projects1/Koken/analysis/genotypes/
+
+pt1=((pwd)"/")
+fn1="/data2/projects1/Koken/analysis/genotypes/Koken_MLBA.qpAdm.1240K.250522"
+fn2="/data2/PubData/Narasimhan2019Science/analysis/genotypes/centralSouthAsia.EIGENSTRAT"
+fn3="/data2/PubData/Human_1240K_genotypes/1240K.250304"
+
+csl=${pt1}"Central_Steppe_MLBA.list"
+wsl=${pt1}"Western_Steppe_MLBA.list"
+
+of1="Steppe_MLBA.pop.qpWave.1240K.250527"
+tn1="temp1_"${of1}
+
+## Extract Central_Steppe_MLBA individuals
+cut -f 2 ${csl} | sort | uniq > ${tn1}_1
+cn1s=($(cut -f 1 ${csl} | fgrep -wf - ${fn2}.ind -n | fgrep -wf ${tn1}_1 - | cut -d : -f 1 | xargs | sed 's/ /,/g'))
+cut -c ${cn1s} ${fn2}.geno > ${tn1}_1.geno
+cut -f 1 ${csl} | fgrep -wf - ${fn2}.ind | fgrep -wf ${tn1}_1 - > ${tn1}_1.ind
+
+## Extract Western_Steppe_MLBA individuals
+## First, individuals newly reported by Narasimhan et al. 2019
+cut -f 2 ${wsl} | sort | uniq > ${tn1}_2
+cn2s=($(cut -f 1 ${wsl} | fgrep -wf - ${fn2}.ind -n | fgrep -wf ${tn1}_2 - | cut -d : -f 1 | xargs | sed 's/ /,/g'))
+cut -c ${cn2s} ${fn2}.geno > ${tn1}_2.geno
+cut -f 1 ${wsl} | fgrep -wf - ${fn2}.ind | fgrep -wf ${tn1}_2 - > ${tn1}_2.ind
+## Then, individuals not newly reported by Narasimhan et al. 2019
+cut -f 1 ${fn2}.ind | fgrep -wvf - ${wsl} | cut -f 1 > ${tn1}_3
+cn3s=($(fgrep -wf ${tn1}_3 ${fn3}.ind -n | cut -d : -f 1 | xargs | sed 's/ /,/g'))
+cut -c ${cn3s} ${fn3}.geno > ${tn1}_3.geno
+fgrep -wf ${tn1}_3 ${fn3}.ind > ${tn1}_3.ind
+## I omitted two individuals (Corded_Ware_Czech; I7279 and I7280) as they are not included in the data set but they are small in the sample size
+
+## Extract Koken_MLBA and outgroups
+cn4s=($(cat ${csl} ${wsl} | cut -f 1 | fgrep -wvf - ${fn1}.ind -n | cut -d : -f 1 | xargs | sed 's/ /,/g'))
+cut -c ${cn4s} ${fn1}.geno > ${tn1}_4.geno
+cat ${csl} ${wsl} | cut -f 1 | fgrep -wvf - ${fn1}.ind > ${tn1}_4.ind
+
+## Merge dataset
+paste ${tn1}_1.geno ${tn1}_2.geno ${tn1}_3.geno ${tn1}_4.geno -d '' > ${of1}.geno
+cat ${tn1}_1.ind ${tn1}_2.ind ${tn1}_3.ind ${tn1}_4.ind > ${of1}.ind
+cp ${fn1}.snp ${of1}.snp
+
+## Reformat data into binary PLINK format
+echo "genotypename: "${pt1}${of1}".geno" > ${tn1}_1.par
+echo "snpname: "${pt1}${of1}".snp" >> ${tn1}_1.par
+echo "indivname: "${pt1}${of1}".ind" >> ${tn1}_1.par
+echo "outputformat: PACKEDPED" >> ${tn1}_1.par
+echo "genooutfilename: "${pt1}${tn1}"_1.bed" >> ${tn1}_1.par
+echo "snpoutfilename: "${pt1}${tn1}"_1.pedsnp" >> ${tn1}_1.par
+echo "indoutfilename: "${pt1}${tn1}"_1.pedind" >> ${tn1}_1.par
+
+convertf -p ${tn1}_1.par
+
+awk '{OFS="\t"} {print $1,$2,$3,$4,$5,$6}' ${tn1}_1.pedsnp > ${tn1}_1.bim
+awk '{if ($2 == "M") print $3,$1,"0 0 1 2"; else if ($2 == "F") print $3,$1,"0 0 2 2";
+      else print $3,$1,"0 0 0 2"}' ${of1}.ind > ${tn1}_1.fam
+
+## Rename the files
+for K in bed bim fam; do cp ${tn1}_1.${K} ${of1}.${K}; done
+
+rm ${tn1}_*
+
+
+
+
+######################################################
+## 2. Run qpAdm for Koken_MLBA using admixtools2    ##
+######################################################
+
+cd /data2/projects1/Koken/analysis/genotypes/
+
+R
+
+rm(list=ls())
+setwd("/data2/projects1/Koken/analysis/genotypes/")
+
+library(admixtools)
+library(dplyr)
+
+#####################################################################
+## qpWave analysis of Koken_MLBA, central steppe_MLBA and western steppe_MLBA  ##
+
+fn1 = "Steppe_MLBA.pop.qpWave.1240K.250527"
+
+rp1s = c("Mbuti.DG", "Ami.DG", "Onge.DG", "Mixe.DG", "Iran_N", "Villabruna", "Anatolia_N")
+
+## qpWave for Koken_MLBA, Central_Steppe_MLBA and Western_Steppe_MLBA
+lp1s = c("Koken_MLBA")
+lp2s = c("Georgievsky_LBA", "Kashkarchi_BA", "Kazakh_Mys_MLBA", "Krasnoyarsk_MLBA", "Kyzlbulak_MLBA1")
+lp2s = c(lp2s, "Oy_Dzhaylau_MLBA", "Shoendykol_MLBA_Fedorovo", "Taldysay_MLBA1", "Zevakinskiy_BA")
+lp3s = c("Ak_Moustafa_MLBA1", "Aktogai_MLBA", "Bylkyldak_MLBA", "Corded_Ware_Czech_EN")
+lp3s = c(lp3s, "Corded_Ware_Germany", "Guruldek_LBA", "Kairan_MLBA", "Karagash_MLBA", "Lisakovskiy_MLBA_Alakul", "Maitan_MLBA_Alakul")
+lp3s = c(lp3s, "Petrovka", "Potapovka", "Priobrazhenka_MLBA", "Sintashta_MLBA", "Solyanka_MLBA", "Srubnaya")
+
+lps = c(lp1s, lp2s, lp3s)
+
+results = lapply(1:(length(lps)-1), function(x) {lapply((x+1):length(lps), function(y) {f2 <- f2_from_geno(fn1, pops=c(rp1s, lps[x], lps[y]), maxmiss=0, poly_only=FALSE);
+      qpwave(f2, left=c(lps[x], lps[y]), right=rp1s)})})
+
+## Extract p-values for all populations
+results_table = matrix(0, nrow=length(lps), ncol=length(lps))
+results_table[lower.tri(results_table, diag = FALSE)] = lapply(results, function(x) {lapply(x, function(y) {y$rankdrop$p})}) %>% unlist()
+results_table[upper.tri(results_table, diag = FALSE)] = t(results_table)[upper.tri(t(results_table), diag = FALSE)]
+rownames(results_table) <- lps; colnames(results_table) <- lps
+write.csv(results_table, paste(fn1, "_qpwave.csv", sep=""))
+
+## Extract p-values for populations with more than 2 individuals
+lps_3 = c("Koken_MLBA", "Kazakh_Mys_MLBA", "Krasnoyarsk_MLBA", "Oy_Dzhaylau_MLBA", "Shoendykol_MLBA_Fedorovo")
+lps_3 = c(lps_3, "Aktogai_MLBA", "Corded_Ware_Czech_EN", "Corded_Ware_Germany", "Kairan_MLBA", "Maitan_MLBA_Alakul", "Petrovka", "Sintashta_MLBA", "Srubnaya")
+results_table_3 = results_table[lps_3, lps_3]
+rownames(results_table_3) <- lps_3; colnames(results_table_3) <- lps_3
+write.csv(results_table_3, paste(fn1, "_3_qpwave.csv", sep=""))
+
+save.image(paste(fn1, ".Rdata", sep=""))
+
+#####################################################################
+## Proximal admixture modeling of Koken_MLBA and Krasnoyarsk_MLBA  ##
+
+## A list of the second source
+lp2s = c("Mergen6_HG", "Sosnoviy_HG", "Botai_Eneolithic", "Omskaya_HG", "Borovjanka17_HG", 
+         "Vengerovo2_HG", "Protoka_HG", "Koken_EN2", "Koken_EN1", "Altai_7500BP", 
+         "Altai_6500BP", "Altai_5500BP", "Itkul_HG", "UstIsha_HG", "BZK002", "DolgoeOzero_HG")
+
+rp2s = c("Mbuti.DG", "Ami.DG", "Onge.DG", "Mixe.DG", "Iran_N", "Villabruna", "Anatolia_N", "Tarim_EMBA1", "UOO_M", "WestBaikal_LNBA")
+
+m203s = lapply(lp2s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp2s, "Sintashta_MLBA", x, "Kazakh_Mys_MLBA"), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Sintashta_MLBA", x), right=rp2s, target="Kazakh_Mys_MLBA") })
+m204s = lapply(lp2s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp2s, "Sintashta_MLBA", x, "Oy_Dzhaylau_MLBA"), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Sintashta_MLBA", x), right=rp2s, target="Oy_Dzhaylau_MLBA") })
+m205s = lapply(lp2s, function(x) {f2 <- f2_from_geno(fn1, pops=c(rp2s, "Sintashta_MLBA", x, "Shoendykol_MLBA_Fedorovo"), maxmiss=0, poly_only=F);
+      qpadm(f2, left=c("Sintashta_MLBA", x), right=rp2s, target="Shoendykol_MLBA_Fedorovo") })
+
+## Extract p-value, coefficients, and SEs for Kazakh_Mys_MLBA
+c203s = cbind(unlist(lapply(m203s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m203s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=4, byrow=T))
+
+## Extract p-value, coefficients, and SEs for Oy_Dzhaylau_MLBA
+c204s = cbind(unlist(lapply(m204s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m204s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=4, byrow=T))
+
+## Extract p-value, coefficients, and SEs for Shoendykol_MLBA_Fedorovo
+c205s = cbind(unlist(lapply(m205s, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m205s, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=4, byrow=T))
+
+#####################################################################
+## Proximal admixture modeling of Koken_MLBA and Krasnoyarsk_MLBA  ##
+
+tps = c("Koken_MLBA", "Kazakh_Mys_MLBA", "Krasnoyarsk_MLBA", "Oy_Dzhaylau_MLBA", "Shoendykol_MLBA_Fedorovo")
+rp2s_removed = rp2s[rp2s != "UOO_M"]
+
+m206s_added = lapply(tps, function(x) { qpadm(fn1, left=c("Sintashta_MLBA", "Koken_EN1", "irk030"), right=rp2s, target=x) })
+m207s_added = lapply(tps, function(x) { qpadm(fn1, left=c("Sintashta_MLBA", "Koken_EN1", "UOO_M"), right=rp2s_removed, target=x) })
+m208s_added = lapply(tps, function(x) { qpadm(fn1, left=c("Sintashta_MLBA", "Koken_EN1", "Mergen6_HG"), right=rp2s, target=x) })
+
+## Extract p-value, coefficients, and SEs for irk030 model
+c206s_added = cbind(unlist(lapply(m206s_added, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m206s_added, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=6, byrow=T))
+
+## Extract p-value, coefficients, and SEs for UOO_M model
+c207s_added = cbind(unlist(lapply(m207s_added, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m207s_added, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=6, byrow=T))
+
+## Extract p-value, coefficients, and SEs for Mergen6_HG model
+c208s_added = cbind(unlist(lapply(m208s_added, function(x) { x$rankdrop$p[1] })), 
+              matrix(unlist(lapply(m208s_added, function(x) { c(as.vector(x$weights$weight), as.vector(x$weights$se)) })), ncol=6, byrow=T))
+
+## Extract nested p-values
+nested_ps_irk030 = unlist(lapply(m206s_added, function(x) {1-pchisq(x$popdrop$chisq[2]-x$popdrop$chisq[1], df=x$popdrop$dof[2]-x$popdrop$dof[1])}))
+nested_ps_UOO_M = unlist(lapply(m207s_added, function(x) {1-pchisq(x$popdrop$chisq[2]-x$popdrop$chisq[1], df=x$popdrop$dof[2]-x$popdrop$dof[1])}))
+nested_ps_Mergen6_HG = unlist(lapply(m208s_added, function(x) {1-pchisq(x$popdrop$chisq[2]-x$popdrop$chisq[1], df=x$popdrop$dof[2]-x$popdrop$dof[1])}))
+nested_ps_Koken_EN1 = unlist(lapply(m208s_added, function(x) {1-pchisq(x$popdrop$chisq[3]-x$popdrop$chisq[1], df=x$popdrop$dof[3]-x$popdrop$dof[1])}))
+
+save.image(paste(fn1, ".Rdata", sep=""))
