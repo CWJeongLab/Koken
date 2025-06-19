@@ -1,8 +1,3 @@
 # Koken
 
-This is the repository for the paper "". 
-This repository contains following:
-
-1_genotype:
-2_figures:
-3_code:
+This repository contains genotype data and scripts used for the analyses in "Ancient genomes from eastern Kazakhstan reveal dynamic genetic legacy of Inner Eurasian hunter-gatherers".
