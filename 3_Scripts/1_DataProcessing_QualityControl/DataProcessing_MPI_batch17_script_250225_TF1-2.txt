@@ -1,0 +1,921 @@
+########################################################################################
+## Processing of Koken MLBA ssLib samples (n=19; 19 KKN)                          ##
+## This is deeper sequencing of 1240K capture data (TF1.2)                            ##
+## I apply a new wrapper script for this processing                                   ##
+########################################################################################
+
+#######################################################
+## 0. Create the list file and set up directories    ##
+#######################################################
+
+cd /home/projects1/DataProcessing_MPI/
+
+pt1=($(pwd)"/")
+listf=${pt1}"DataProcessing_MPI_batch17_list_TF1.2.txt"
+fdir=${pt1}"rawFastQ/temp1/250218_LH00454_0092_A22TCY3LT3/"
+iids="KKN"
+ltval="ssLib"
+sp="Human"
+
+## Create a list file
+while read -r tfdir; do
+    sid=($(basename ${tfdir}))
+    iid=($(echo ${sid} | cut -c 1-12)) 
+    sdir="./rawFastQ/"${iid}"/"${sid}
+    if [ -d "$sdir" ]; then
+        fqs=""
+        while read fq; do
+            if [[ "$fqs" == "" ]]; then fqs+=${fq}; else fqs+=","${fq}; fi
+        done < <(realpath ${sdir}/*.gz)
+        echo -e ${iid}"\t"${sid}"\t"${fqs}"\t"${ltval}"\t"${sp} >> ${listf}
+    fi
+done < <(ls -d ${fdir}${iids}*)
+
+## Make directories
+mkdir -p ${pt1}1240Kbam/ ${pt1}analysis/preseq/ ${pt1}analysis/coverage/
+
+
+
+######################################################################
+## 1. Run the wrapper for the first 1240K capture data              ##
+######################################################################
+
+cd /home/projects1/DataProcessing_MPI/
+
+pt1=($(pwd)"/")
+listf=${pt1}"DataProcessing_MPI_batch17_list_TF1.2.txt"
+ref="/home/References/Human/hs37d5.fa"
+scf1=${pt1}"MPIdata_1240K_r2_wrapper_220822.sh"
+
+## First, make directories
+while read -r iid rid fq type sp; do
+    mkdir -p ./FastQ/${iid}/${rid}/ ./BAM/${iid}/${rid}/ ./1240Kbam/${iid}/${rid}/ ./analysis/mapDamage/${iid}/${rid}/
+done < ${listf}
+
+idnmax=($(wc -l ${listf}))
+nperrun=7
+
+## Run the job as a job array
+## Run only the limited number of jobs at a time
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 15000 --wrap=${scf1}" "${listf}" "${ref}
+## sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 15000 -p amd --wrap=${scf1}" "${listf}" "${ref}
+
+sbatch --array=2-${idnmax} -c 2 --mem 3000 --wrap="./aaa1.sh "${listf}" "${ref}
+
+rm slurm-*
+
+#########################################################################
+## Save the following script as "MPIdata_1240K_r2_wrapper_220822.sh"   ##
+
+#!/bin/bash
+
+pt1=($(pwd)"/")
+
+listf=$1  ## A list of samples to be processed (LID, run, FastQs, type)
+ref=$2    ## the reference genome
+inum=$SLURM_ARRAY_TASK_ID
+
+iid=($(awk -v inum="$inum" '{if (inum == NR) print $1}' ${listf}))   ## Individual/library ID
+lid=($(awk -v inum="$inum" '{if (inum == NR) print $2}' ${listf}))   ## run ID that will be used as a library ID
+tfqs=($(awk -v inum="$inum" '{if (inum == NR) print $3}' ${listf}))  ## comma separated FastQ files
+type=($(awk -v inum="$inum" '{if (inum == NR) print $4}' ${listf}))  ## library type
+
+seedval="32"; if [[ "$type" == "ssLib" ]] || [[ "$type" == "non-UDG" ]]; then seedval="9999"; fi
+nrmax=100000
+
+##############################################################
+## Part 1. Run AdapterRemoval (keep 35 bp or longer reads)  ##
+
+## Common options for AdapterRemoval; keep minlength 35 bps
+optstr="--gzip --threads 8 --trimns --trimqualities "
+optstr+="--adapter1 AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC "
+optstr+="--adapter2 AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGTA "
+optstr+="--minlength 35 --minquality 20 --minadapteroverlap 1"
+
+cd ${pt1}FastQ/${iid}/${lid}/
+
+## Take a list of FastQ files and decide if they are SE or PE
+stval=($(echo ${tfqs} | sed s/","/"\n"/g | awk '$1 ~ /_R2_/' | wc -l | awk '{if ($1 > 0) print "PE"; else print "SE"}'))
+
+fq1s=""; while read fq; do
+    if [[ "$fq1s" == "" ]]; then fq1s+=${fq}; else fq1s+=" "${fq}; fi
+done < <(echo ${tfqs} | sed s/","/"\n"/g | awk '$1 !~ /_R2_/')
+if [[ "$stval" == "PE" ]]; then
+    fq2s=""; while read fq; do
+        if [[ "$fq2s" == "" ]]; then fq2s+=${fq}; else fq2s+=" "${fq}; fi
+    done < <(echo ${tfqs} | sed s/","/"\n"/g | awk '$1 ~ /_R2_/')
+fi
+
+fqout=${lid}".L35.fq"
+
+## Run AdapterRemoval
+if [[ "$stval" == "SE" ]]; then
+    AdapterRemoval --file1 ${fq1s} --basename ${fqout} ${optstr}
+else
+    AdapterRemoval --file1 ${fq1s} --file2 ${fq2s} --basename ${fqout} ${optstr} --collapse
+    zcat ${fqout}.collapsed.gz ${fqout}.collapsed.truncated.gz ${fqout}.singleton.truncated.gz \
+    | gzip > ${fqout}.combined.gz
+fi
+
+
+#######################################################################
+## Part 2. Map adapter-removed FastQ files to the reference genome   ##
+
+dedup="java -Xmx8192m -jar /opt/ohpc/pub/apps/dedup/0.12.8/DeDup-0.12.8.jar"
+
+## Move into the target directory
+cd ${pt1}BAM/${iid}/${lid}/
+
+## Input FastQ (after running AdapterRemoval)
+if [[ "$stval" == "SE" ]]; then
+    fqin=${pt1}"FastQ/"${iid}"/"${lid}"/"${fqout}".truncated.gz"
+else
+    fqin=${pt1}"FastQ/"${iid}"/"${lid}"/"${fqout}".combined.gz"
+fi
+
+## Setup output BAM file prefix
+of1=${lid}".L35.mapped"
+
+## Define read group
+RG="@RG\tID:"${lid}"\tSM:"${iid}"\tLB:"${lid}"\tPL:illumina"
+
+## Run BWA aln (-l 9999 for non-UDG, -l 32 for UDG-half)
+bwa aln -t 8 -n 0.01 -l ${seedval} -f ${of1}.sai ${ref} ${fqin}
+
+## Run BWA samse and filter out unmapped reads
+bwa samse -r ${RG} ${ref} ${of1}.sai ${fqin} | samtools view -h -F 0x0004 -o ${of1}.0.bam -
+
+## Sort the output file and index
+samtools sort -@ 7 -m 512M ${of1}.0.bam -o ${of1}.bam
+samtools index ${of1}.bam
+
+## Remove temporary files
+rm ${of1}.0.bam
+rm ${of1}.sai
+
+
+###############################################################
+## Part 3. Merge 1240K capture data into a single BAM file   ##
+##         and remove duplicates and apply -q30 filter       ##
+
+## Make and move into the target directory
+mkdir -p ${pt1}BAM/${iid}/merged/; cd ${pt1}BAM/${iid}/merged/
+
+## Setup output BAM file prefix
+of1=${iid}".L35.mapped"
+
+## Retrieve each round of 1240K BAM files to be merged
+## and count BAM files
+ibam1s=""; nbams=0
+while read tibam; do
+    if [[ "$ibam1s" == "" ]]; then ibam1s+=${tibam}; else ibam1s+=" "${tibam}; fi
+    let nbams+=1
+done < <(ls ../*.TF*/*.mapped.bam)
+
+## Merge the BAM files (if there is only one file, simply copy it)
+if [ "$nbams" -eq 1 ]; then
+    cp ${ibam1s} ${of1}.bam
+else
+    samtools merge -cpf ${of1}.bam ${ibam1s}
+fi
+
+## Remove duplicates using dedup
+${dedup} -i ${of1}.bam -m -o ./
+mv ${of1}_rmdup.bam ${of1}.rmdup.bam
+samtools index ${of1}.rmdup.bam
+rm ${of1}.dedup.json
+
+mv ${of1}.hist ${of1}.rmdup.hist
+mv ${of1}.log ${of1}.rmdup.log
+
+## Apply quality filter (-q30)
+samtools view -bh -q30 -o ${of1}.rmdup.q30.bam ${of1}.rmdup.bam
+samtools index ${of1}.rmdup.q30.bam
+
+
+############################
+## Part 4. Run mapDamage  ##
+
+cd ${pt1}analysis/mapDamage/
+
+bam=($(realpath ${pt1}BAM/${iid}/merged/${iid}.L35.mapped.rmdup.q30.bam))
+
+mapDamage -i ${bam} -r ${ref} -d ./${iid}/${lid} --merge-reference-sequences --no-stat -t ${lid} -n ${nrmax}
+
+
+########################################
+## Part 5. Extract the 1240K BAM file ##
+
+cd ${pt1}1240Kbam/
+
+mkdir -p ./${iid}/merged/
+
+bedf="/home/References/Human/SNPCapBEDs/1240K.pos.list_hs37d5.0based.bed"
+
+ibam=($(realpath ../BAM/${iid}/merged/${iid}.L35.mapped.rmdup.q30.bam))  ## mapped.rmdup.q30 reads
+obam="./"${iid}"/merged/"${iid}".L35.1240K.mapped.rmdup.q30"
+
+## Extract 1240K+MT from mapped BAM
+samtools view -bh -L ${bedf} -o ${obam}.1.bam ${ibam}
+samtools index ${obam}.1.bam
+
+samtools view -bh -o ${obam}.2.bam ${ibam} MT
+samtools index ${obam}.2.bam
+
+samtools merge -c -p ${obam}.bam ${obam}.1.bam ${obam}.2.bam
+samtools index ${obam}.bam
+
+rm ${obam}.1.bam* ${obam}.2.bam*
+
+
+
+
+############################################################
+## 2. Collect summary statistics                          ##
+## for the merged date  ##
+############################################################
+
+cd /home/projects1/DataProcessing_MPI/BAM/
+
+pt1=($(pwd)"/")
+listf="/home/projects1/DataProcessing_MPI/DataProcessing_MPI_batch17_list_TF1.2.txt"
+of0="DataProcessing_MPI_batch17_TF1.2_summary_250225.txt"
+
+## Collect the summary statistics
+echo -e 'ID\tLID\tnr.all\tnr.trimmed\tlen.trimmed\tnr.mapped\tpr.endo%\tnr.rmdup\tcluster.factor\tnr.rmdup.q30' > ${of0}
+while read -r iid lid fq type sp; do
+    lid0=($(echo ${lid} | sed s/"TF1.2"/"TF1.1"/g))
+    logf=($(realpath ../FastQ/${iid}/${lid}/${lid}.L35.fq.settings))
+    logf0=($(realpath ../FastQ/${iid}/${lid0}/${lid0}.L35.fq.settings))
+    n1=($(cat ${logf0} ${logf} | awk 'BEGIN {n=0} {if ($1 ~ /^Total/) n+=$NF} END {print n}'))
+    n2=($(cat ${logf0} ${logf} | awk 'BEGIN {n=0} {if ($0 ~ /Number of retained reads/) n+=$5} END {print n}'))
+    n3=($(cat ${logf} | awk '{if ($0 ~ /Average length of retained reads/) print $6}'))
+    ## tof1="./"${iid}"/"${lid}"/"${lid}".L35.mapped"
+    tof1="./"${iid}"/merged/"${iid}".L35.mapped"
+    n4=($(samtools view -c ${tof1}.bam))
+    n5=($(samtools view -c ${tof1}.rmdup.bam))
+    n6=($(samtools view -c ${tof1}.rmdup.q30.bam))
+    echo ${iid} ${lid} ${n1} ${n2} ${n3} ${n4} ${n5} ${n6} \
+        | awk '{OFS="\t"} {print $1,$2,$3,$4,$5,$6,100*$6/$4,$7,$6/$7,$8}' >> ${of0}
+    echo ${iid} ${lid} "is processed"
+done < ${listf}
+
+
+
+##########################################################
+## 3. Collect mapDamage summary statistics and figures  ##
+##########################################################
+
+cd /home/projects1/DataProcessing_MPI/analysis/mapDamage/
+
+pt1=($(pwd)"/")
+listf="/home/projects1/DataProcessing_MPI/DataProcessing_MPI_batch17_list_TF1.2.txt"
+of0="DataProcessing_MPI_batch17.TF1.2.mapDamage.250225.txt"
+
+## Retrieve the numbers
+echo -e 'ID\tLID\tDMG51\tDMG52\tDMG31\tDMG32' > ${of0}
+while read -r iid lid fq type sp; do
+    tfn1="./"${iid}"/"${lid}"/5pCtoT_freq.txt"
+    tfn2="./"${iid}"/"${lid}"/3pGtoA_freq.txt"
+    tnum1=($(head -2 ${tfn1} | tail -1 | awk '{print $2}'))
+    tnum2=($(head -3 ${tfn1} | tail -1 | awk '{print $2}'))
+    tnum3=($(head -2 ${tfn2} | tail -1 | awk '{print $2}'))
+    tnum4=($(head -3 ${tfn2} | tail -1 | awk '{print $2}'))
+    echo -e ${iid}"\t"${lid}"\t"${tnum1}"\t"${tnum2}"\t"${tnum3}"\t"${tnum4} >> ${of0}
+done < ${listf}
+
+## Retrieve mapDamage plots
+snum=1; s1=""; s2=""
+while read -r iid lid fq type sp; do
+    if [ "$snum" -lt 10 ]; then sval="00"${snum}; elif [ "$snum" -lt 100 ]; then sval="0"${snum}; else sval=${snum}; fi
+    s1+=" ./"${iid}"/"${lid}"/Fragmisincorporation_plot.pdf"
+    s2+=" ./"${iid}"/"${lid}"/Length_plot.pdf"
+    let snum+=1
+done < ${listf}
+
+pdfunite ${s1} DataProcessing_MPI_batch17_TF1.2_Frag_250225.pdf
+pdfunite ${s2} DataProcessing_MPI_batch17_TF1.2_Length_250225.pdf
+
+
+
+###########################################################################
+## 4. Calculate coverage on 1240K sites & mtDNA using merged data        ##
+###########################################################################
+
+cd /home/projects1/DataProcessing_MPI/analysis/coverage/
+
+pt1=($(pwd)"/")
+idf="/home/projects1/DataProcessing_MPI/DataProcessing_MPI_batch17_list_TF1.2.txt"
+bedf="/home/References/Human/SNPCapBEDs/1240K.pos.list_hs37d5.0based.bed"
+scf=${pt1}"cov_calc_script_210619.sh"
+of0="DataProcessing_MPI_batch17.TF1.2.1240K.coverage.250225.txt"
+
+## First, make directories
+while read -r iid lid fq type sp; do mkdir -p ./${iid}/${lid}/; done < ${idf}
+
+idnmax=($(wc -l ${idf}))
+nperrun=10
+
+## Run the job as a job array
+## Run only the limited number of jobs at a time
+sbatch --array=1-${idnmax}%${nperrun} -c 2 --mem 2500 --wrap=${scf}" "${idf}
+
+## Merge all output files into one
+echo -e 'ID\tAuto\tchrX\tchrY\tchrMT' > ${of0}
+while read -r iid lid fq type sp; do
+    tf1="./"${iid}"/"${lid}"/"${lid}".1240K.coverage.txt"
+    aC=($(head -3 ${tf1} | tail -1 | awk '{printf("%.5f\n"), $2}'))
+    xC=($(head -1 ${tf1} | tail -1 | awk '{printf("%.5f\n"), $2}'))
+    yC=($(head -2 ${tf1} | tail -1 | awk '{printf("%.5f\n"), $2}'))
+    mC=($(head -4 ${tf1} | tail -1 | awk '{printf("%.2f\n"), $2}'))
+    echo -e ${iid}"\t"${aC}"\t"${xC}"\t"${yC}"\t"${mC} >> ${of0}
+done < ${idf}
+
+rm slurm-*
+
+########################################################
+## Save the following as "cov_calc_script_210619.sh"  ##
+
+#!/bin/bash
+
+listf=$1  ## A list of samples to be processed (LID, run, FastQs, type)
+inum=$SLURM_ARRAY_TASK_ID
+
+iid=($(awk -v inum="$inum" '{if (inum == NR) print $1}' ${listf}))   ## Individual/library ID
+lid=($(awk -v inum="$inum" '{if (inum == NR) print $2}' ${listf}))   ## run ID that will be used as a library ID
+
+bam1=($(realpath ../../1240Kbam/${iid}/merged/${iid}.L35.1240K.mapped.rmdup.q30.bam))  ## 1240K BAM
+
+bedf="/home/References/Human/SNPCapBEDs/1240K.pos.list_hs37d5.0based.bed"
+of1="./"${iid}"/"${lid}"/"${lid}".1240K.coverage.txt"
+tn1="./"${iid}"/"${lid}"/temp1_"${lid}".1240K.coverage.txt"
+
+samtools depth -q30 -Q30 -aa -b ${bedf} ${bam1} >> ${tn1}_1  ## 1240K sites
+samtools depth -q30 -Q30 -aa -r MT ${bam1} >> ${tn1}_1       ## MT
+
+## Then, calculate autosomal, X and Y coverage
+awk 'BEGIN { xR = 0; yR = 0; aR = 0; mr = 0; xS = 0; yS = 0; aS = 0; mS = 0 }
+     { chr = $1; pos = $2; cov = $3;
+       if (chr == "X") { xR += cov; xS += 1 }
+       else if (chr == "Y") { yR += cov; yS += 1 }
+       else if (chr == "MT") { mR += cov; mS += 1 }
+       else { aR += cov; aS += 1 }
+     }
+     END { OFS="\t"
+       print("xCoverage", xS > 0 ? xR / xS : 0)
+       print("yCoverage", yS > 0 ? yR / yS : 0)
+       print("autCoverage", aS > 0 ? aR / aS : 0)
+       print("mtCoverage", mS > 0 ? mR / mS : 0)
+     }' ${tn1}_1 > ${of1}
+
+rm ${tn1}_1
+
+
+
+###########################################################################
+## 5. Run preseq on q30 1240K reads                                      ##
+###########################################################################
+
+cd /home/projects1/DataProcessing_MPI/analysis/preseq/
+
+pt1=($(pwd)"/")
+idf="/home/projects1/DataProcessing_MPI/DataProcessing_MPI_batch17_list_TF1.2.txt"
+summaryf="/home/projects1/DataProcessing_MPI/BAM/DataProcessing_MPI_batch17_TF1.2_summary_250225.txt"
+scf="preseq_round2_script_220822.sh"
+of0="DataProcessing_MPI_batch17.TF1.2.1240K.preseq.250225.txt"
+prsfx="TF1.1"
+
+## First, make directories
+while read -r iid lid fq type; do mkdir -p ./${iid}/${lid}/; done < ${idf}
+
+idnmax=($(wc -l ${idf}))
+nperrun=13
+
+## Run the job as a job array
+## Run only the limited number of jobs at a time
+sbatch --array=1-${idnmax}%${nperrun} -c 4 --mem 5000 --wrap=${scf}" "${idf}" "${summaryf}" "${prsfx}
+
+## Merge all output files into one
+echo -e 'ID\tnr.all\tnr.on\tpr.on\tnr.on.rmdup\tCI.on' > ${of0}
+while read -r iid lid fq type; do
+    tf1="./"${iid}"/"${lid}"/"${lid}".1240K.lcextrap.readcounts.txt"
+    tail -1 ${tf1} | awk '{OFS="\t"} {print $1,$2,$3,100*$3/$2,$4,$3/$4}' >> ${of0}
+done < ${idf}
+
+## Copy .pdf files
+s1=""
+while read -r iid lid fq type; do
+    s1+=" ./"${iid}"/"${lid}"/"${lid}".1240K.lcextrap.preseq.pdf"
+done < ${idf}
+
+pdfunite ${s1} DataProcessing_MPI_batch05_TF1.2_preseq_230411.pdf
+
+rm slurm-*
+
+#############################################################
+## Save the following as "preseq_round2_script_220822.sh"  ##
+
+#!/bin/bash
+
+listf=$1     ## A list of samples to be processed (LID, run, FastQs, type)
+summaryf=$2  ## Sequencing summary file
+prsfx=$3     ## suffix for the previous round
+inum=$SLURM_ARRAY_TASK_ID
+
+iid=($(awk -v inum="$inum" '{if (inum == NR) print $1}' ${listf}))   ## Individual/library ID
+lid=($(awk -v inum="$inum" '{if (inum == NR) print $2}' ${listf}))   ## run ID that will be used as a library ID
+
+bedf="/home/References/Human/SNPCapBEDs/1240K.pos.list_hs37d5.0based.bed"
+dedup="java -Xmx4096m -jar /opt/ohpc/pub/apps/dedup/0.12.8/DeDup-0.12.8.jar"
+
+ibam=($(realpath ../../BAM/${iid}/merged/${iid}.L35.mapped.bam))
+
+of0="./"${iid}"/"${lid}"/"${lid}".1240K.lcextrap"
+of1=${of0}".txt"
+of2=${of0}".readcounts.txt"
+tn1="./"${iid}"/"${lid}"/temp1_"${lid}".1240K.lcextrap"
+
+## Extract high quality (-q30) on target reads; then run DeDup; then run preseq lc_extrap
+samtools view -bh -q30 -L ${bedf} -o ${tn1}.bam ${ibam}
+${dedup} -i ${tn1}.bam -m -o ./${iid}/${lid}/
+preseq lc_extrap -s 1e5 -e 1e9 -o ${tn1} -H ${tn1}.hist
+
+## Reformat preseq lc_extrap output
+echo 'nReads '${lid}' '${lid}'_lb '${lid}'_ub' > ${of1}
+tail -n +2 ${tn1} | awk '{print $1,$2,$3,$4}' >> ${of1}
+gzip ${of1}
+
+## Retrieve the preseq results from the previous round
+sumf=($(realpath ./${iid}/${iid}.${prsfx}/*.readcounts.txt))
+sumf0=($(echo ${sumf} | sed s/".readcounts.txt"/""/g))  ## take the prefix for the previous run
+cp ${sumf} ${of2}
+
+## Add the merged data readcounts to .readcounts.txt file
+tnum00=($(tail -n +2 ${of2} | awk 'BEGIN {tnum0=0} {tnum0+=$2} END {print tnum0}'))
+tnum01=($(awk -v iid="$iid" '{if ($1 == iid) print $3}' ${summaryf}))
+let tnum1=${tnum00}+${tnum01}
+tnum2=($(samtools view -c ${tn1}.bam))
+tnum3=($(samtools view -c ${tn1}_rmdup.bam))
+echo ${iid}" "${tnum1}" "${tnum2}" "${tnum3} >> ${of2}
+
+Rscript /home/choongwon_jeong/bin/1240K_capture_q30_preseq_r2_plot_181218.R ${of0} ${sumf0}
+
+rm ${tn1}; rm ${tn1}.*; rm ${tn1}_*
+
+
+
+#######################################################
+## 6. X-based contamination estimation using ANGSD   ##
+##    This time, use 1240K data to make a quick run  ##
+##    Also, use non-masked BAM files                 ##
+#######################################################
+
+cd /home/projects1/DataProcessing_MPI/analysis/Xcont/
+
+pt1=($(pwd)"/")
+idf="/home/projects1/DataProcessing_MPI/DataProcessing_MPI_batch17_list_TF1.2.txt"
+of0="DataProcessing_MPI_batch17.TF1.2.Xcont.250225.txt"
+scf1=${pt1}"xcont_jobarray_210619.sh"
+
+## Make the directories
+while read -r iid lid fq type sp; do mkdir -p ./${iid}/${lid}/; done < ${idf}
+
+idnmax=($(wc -l ${idf}))
+nperrun=${idnmax}
+
+## Run the job as a job array
+## Run only the limited number of jobs at a time
+sbatch --array=1-${idnmax}%${nperrun} -c 2 --mem 2500 --wrap=${scf1}" "${idf}
+
+## Collect Method1 new_llh
+echo -e 'ID\tnSNP\tnFlank\trSNP\trFlank\tMethod\tMoM\tSE(MoM)\tML\tSE(ML)' > ${of0}
+while read iid lid fq type sp; do
+    tfn1="./"${iid}"/"${lid}"/"${lid}".angsdCounts"
+    tnum0=($(awk 'BEGIN {val=0} {if ($0 ~ /Segmentation fault/) val=1} END {print val}' ${tfn1}))
+    if [ "$tnum0" -eq 1 ]; then
+        echo ${iid}';0;0;NA;NA;Method1:new_ll1;NA;NA;NA;NA' | sed s/';'/'\t'/g >> ${of0}
+    else
+        n1=($(grep nSNP ${tfn1} | cut -d ',' -f 1 | cut -d ' ' -f 7))  ## nSNP covered
+        n2=($(grep nSNP ${tfn1} | cut -d ',' -f 2 | cut -d ' ' -f 4))  ## nFlank covered
+        r1=($(grep rate ${tfn1} | cut -d ':' -f 3 | cut -d ' ' -f 1))  ## SNP mismatch rate
+        r2=($(grep rate ${tfn1} | cut -d ':' -f 2 | cut -d ' ' -f 1))  ## Flanking mismatch rate
+
+        tnum1=($(grep -w "Method1: new_llh" ${tfn1} | wc -l))
+        if [ "$tnum1" -eq 1 ]; then
+            ests=($(grep -w "Method1: new_llh" ${tfn1} | sed s/" "/":"/g | cut -d ':' -f 7,9,11,13 | sed s/':'/';'/g))
+        else
+            ests="NA;NA;NA;NA"
+        fi
+        echo ${iid}';'${n1}';'${n2}';'${r1}';'${r2}';Method1:new_ll1;'${ests} | sed s/"contamination"/""/g | sed s/';'/'\t'/g >> ${of0}
+    fi
+done < ${idf}
+
+rm slurm-*
+
+
+########################################################
+## Save the following as "xcont_jobarray_210619.sh"   ##
+
+#!/bin/bash
+
+listf=$1  ## List file
+inum=$SLURM_ARRAY_TASK_ID
+
+pt1=($(pwd)"/")
+
+iid=($(awk -v inum="$inum" '{if (inum == NR) print $1}' ${listf}))   ## Individual/library ID
+lid=($(awk -v inum="$inum" '{if (inum == NR) print $2}' ${listf}))   ## run ID that will be used as a library ID
+
+bam=($(ls ../../1240Kbam/${iid}/merged/${iid}.L35.1240K.mapped.rmdup.q30.bam))
+of1="./"${iid}"/"${lid}"/"${lid}".angsdCounts"
+
+## First, generate ANGSD input file
+angsd -i ${bam} -r X:5000000-154900000 -doCounts 1 -iCounts 1 -minMapQ 30 -minQ 30 -out ${of1}
+
+## Then, run contamination estimation
+/opt/ohpc/pub/apps/angsd/misc/contamination -a ${of1}.icnts.gz \
+    -h /opt/ohpc/pub/apps/angsd/RES/HapMapChrX.gz 2> ${of1}
+
+
+
+#########################################
+## 7. Run Schmutzi using MT BAM file   ##
+#########################################
+
+cd /home/projects1/DataProcessing_MPI/analysis/schmutzi/
+
+pt1=($(pwd)"/")
+idf="/home/projects1/DataProcessing_MPI/DataProcessing_MPI_batch17_list_TF1.2.txt"
+scf1=${pt1}"schmutzi_jobarray_220822.sh"
+of1="DataProcessing_MPI_batch17.TF1.2.schmutzi.250225.txt"
+udgtag="--nonUDG"
+
+## Make the directories
+while read -r iid lid fq type sp; do mkdir -p ./${iid}/${lid}/; done < ${idf}
+
+idnmax=($(wc -l ${idf}))
+nperrun=10
+
+## Run the job as a job array
+## Run only the limited number of jobs at a time
+sbatch --array=1-${idnmax}%${nperrun} -c 4 --mem 5000 --wrap=${scf1}" "${idf}" "${udgtag}
+
+## Retrieve the number of reads, mean coverage and Schmutzi output
+echo -e 'ID\tnr.MT.only\tmn.cov.MT.only\tcont.nolen\tcont.nolen.lb\tcont.nolen.ub' > ${of1}
+while read -r iid lid fq type sp; do
+    bam=($(ls ./${iid}/${lid}/circularMT/*.MD.bam))
+
+    tnum1=($(samtools view -c ${bam}))
+    if [ "$tnum1" -eq 0 ]; then
+        tnum2="NA"
+    else
+        tnum2=($(samtools depth -a -q30 -Q30 ${bam} | awk 'BEGIN {ns=0; nr=0} {if ($1 == "NC_012920.1") ns+=1; nr+=$3} END {print nr/ns}'))
+    fi
+
+    tcf1="./"${iid}"/"${lid}"/schmutzi/"${lid}".circmapper_nolen_final.cont.est"
+    if [ -f $tcf1 ]; then
+        cont=($(awk '{if ($3 == "") print $1":"$2":NA"; else print $1":"$2":"$3}' ${tcf1}))
+    else cont="NA:NA:NA"; fi
+    echo -e ${iid}"\t"${tnum1}"\t"${tnum2}"\t"${cont} | sed s/":"/"\t"/g >> ${of1}
+done < ${idf}
+
+## Retrieve consensus sequences
+faout1="DataProcessing_MPI_batch17.TF1.2.MTendo.schmutzi.nolen.fasta"
+faout2="DataProcessing_MPI_batch17.TF1.2.MTcont.schmutzi.nolen.fasta"
+
+while read -r iid lid fq type; do
+    logf1="./"${iid}"/"${lid}"/schmutzi/"${lid}".circmapper_nolen_final_endo.log" ## log file for endogenous seq
+    logf2="./"${iid}"/"${lid}"/schmutzi/"${lid}".circmapper_nolen_final_cont.log" ## log file for contaminant seq
+
+    for J in 10 20 30; do hv=">"${iid}".q"${J}
+        if [ -f "$logf1" ]; then
+            echo ${hv} >> ${faout1}; log2fasta -q ${J} ${logf1} | tail -n +2 >> ${faout1}
+        fi
+        if [ -f "$logf2" ]; then
+            echo ${hv} >> ${faout2}; log2fasta -q ${J} ${logf2} | tail -n +2 >> ${faout2}
+        fi
+    done
+done < ${idf}
+
+## Run haplogrep in command line (works well!!)
+for fa in ${faout1} ${faout2}; do
+    java -jar /opt/ohpc/pub/apps/haplogrep/haplogrep-2.1.20.jar --in ${fa} --format fasta --out ${fa}.txt
+done
+
+rm slurm-*
+
+
+##########################################################
+## Save the following as "schmutzi_jobarray_220822.sh"  ##
+
+#!/bin/bash
+
+lf1=$1  ## List file
+inum=$SLURM_ARRAY_TASK_ID
+
+pt1=($(pwd)"/")
+
+iid=($(awk -v inum="$inum" '{if (inum == NR) print $1}' ${lf1}))   ## Individual/library ID
+lid=($(awk -v inum="$inum" '{if (inum == NR) print $2}' ${lf1}))   ## run ID that will be used as a library ID
+type=($(awk -v inum="$inum" '{if (inum == NR) print $4}' ${lf1}))  ## Library type
+
+lty="double"; if [[ "$type" == "ssLib" ]]; then lty="single"; fi
+
+ibam=($(realpath ../../1240Kbam/${iid}/merged/${iid}.L35.1240K.mapped.rmdup.q30.bam))  ## Input BAM file (1240K+MT reads): 1240K.rmdup.q30
+
+## If the second argument is "--nonUDG", then change the base number to 20
+lenDeam=2
+if [ "$#" -gt 1 ]; then
+    udg=$2
+    if [[ "$udg" == "--nonUDG" ]]; then
+        lenDeam=20
+    fi
+fi
+
+pt1=($(pwd)"/")
+MTref1="/home/References/Human/hg19_MT.fasta"
+MTref2="/home/References/Human/hg19_MT_500.fasta"
+ctgn="NC_012920.1"
+nrmax=50000  ## Use max 50,000 reads
+
+rg="@RG\tID:"${lid}"\tSM:"${lid}"\tLB:"${lid}"\tPL:illumina"
+of1=${lid}".circmapper"
+bam1=${of1}".rmdup.q30.MD.small.bam"
+tn1="temp1_"${of1}
+
+cd ${pt1}${iid}/${lid}/
+mkdir -p ./circularMT; mkdir -p ./schmutzi; cd ./circularMT/
+
+samtools view -h ${ibam} MT | awk -v ctgn="$ctgn" '{OFS="\t"} {if ($1 == "@SQ" && $2 ~ /MT$/) print $1,"SN:"ctgn,$3;
+else if ($1 == "@SQ"); else if ($1 ~ /^@/) print $0; else { $3=ctgn; print $0 } }' | samtools view -bh -o ${of1}.rmdup.q30.bam -
+samtools index ${of1}.rmdup.q30.bam
+
+samtools fillmd -b ${of1}.rmdup.q30.bam ${MTref1} > ${of1}.rmdup.q30.MD.bam
+samtools index ${of1}.rmdup.q30.MD.bam
+
+## Downsample reads to run Schmutzi easily (capped to 30,000 reads)
+nr1=($(samtools view -c ${of1}.rmdup.q30.MD.bam))
+pr1=($(echo ${nr1} | awk -v nrmax="$nrmax" '{printf "%.3f\n", nrmax/$1}'))
+if [ "$nr1" -le "$nrmax" ]; then
+    cp ${of1}.rmdup.q30.MD.bam ${of1}.rmdup.q30.MD.small.bam
+    samtools index ${of1}.rmdup.q30.MD.small.bam
+else
+    samtools view -bh -s ${pr1} -o ${of1}.rmdup.q30.MD.small.bam ${of1}.rmdup.q30.MD.bam
+    samtools index ${of1}.rmdup.q30.MD.small.bam
+fi
+
+
+## Move into Schmutzi directory
+cd ../schmutzi/
+
+## Run contDeam (Schmutzi step 1)
+contDeam.pl --library ${lty} --lengthDeam ${lenDeam} --out ./${of1}_nolen ${MTref1} ../circularMT/${bam1}
+
+## Run schmutzi (Schmutzi step 2)
+schmutzi.pl -t 4 --notusepredC --lengthDeam ${lenDeam} --ref ${MTref1} ./${of1}_nolen /opt/ohpc/pub/apps/schmutzi/share/schmutzi/alleleFreqMT/197/freqs/ ../circularMT/${bam1}
+
+
+#############################################################
+## 8. Genotype calling using pileupCaller                  ##
+##    I first call genotypes without masking;              ##
+##    see if trimming 1-2 bps at the 3' end is necessary   ##
+#############################################################
+
+cd /home/projects1/DataProcessing_MPI/analysis/genotypes/
+
+pt1=($(pwd)"/")
+idf="/home/projects1/DataProcessing_MPI/DataProcessing_MPI_batch17_list_TF1.2.txt"
+ref="/home/References/Human/hs37d5.fa"
+posf="/home/References/Human/SNPCapBEDs/1240K.pos.list.txt"
+snpf1="/home/References/Human/SNPCapBEDs/1240K.snp"
+snpf2="/home/References/Human/SNPCapBEDs/HumanOrigins.snp"
+covf="../coverage/DataProcessing_MPI_batch17.TF1.2.1240K.coverage.250225.txt"
+## gidf="DataProcessing_MPI_batch01.groupinfo.210401.txt"
+## nmask=10
+
+of1="DataProcessing_MPI_batch17.1240K.r2"
+of2=${of1}".HumanOrigin"
+tn1="temp1_"${of1}
+tn2=${tn1}"_count"
+
+## Generate pileup
+bam1s=""; iids=""
+while read -r iid lid fq type; do
+    bam1=($(ls ../../1240Kbam/${iid}/merged/*.q30.bam))   ## unmasked BAM
+    if [[ "$iids" == "" ]]; then
+        bam1s+=${bam1}; iids+=${iid}
+    else
+        bam1s+=" "${bam1}; iids+=","${iid}
+    fi
+done < ${idf}
+    
+## Run samtools mpileup for unmasked data (ignore read group info using -R flag)
+## Then, run pileupCaller for unmasked data
+CMD="samtools mpileup -B -R -q30 -Q30 -l "${posf}" -f "${ref}" "${bam1s}" > "${tn1}"_1; "
+CMD+="cut -f 1 "${tn1}"_1 | sed s/'X'/'23'/g | sed s/'Y'/'24'/g | "
+CMD+="paste - "${tn1}"_1 | cut -f 1,3- > "${of1}".pileup; rm "${tn1}"_1"
+CMD+="; pileupCaller --randomHaploid --singleStrandMode --sampleNames "${iids}" -f "${snpf1}" -e "${tn1}"_1 < "${of1}".pileup"
+sbatch -c 8 --mem 15000 --wrap="$CMD"
+
+## Rename the output files
+cp ${tn1}_1.geno ${of1}.geno
+cp ${snpf1} ${of1}.snp
+
+## Update sex info
+while read iid; do
+    grep -w ${iid} ${covf} | awk '{if ($4/$2 > 0.3) print $1"\tM\t"$1;
+        else if ($4/$2 < 0.1) print $1"\tF\t"$1; else print $1"\tU\t"$1}' >> ${of1}.ind
+done < <(awk '{print $1}' ${tn1}_1.ind)
+
+## Count the number and proportion of SNPs typed for 1240K and HumanOrigin
+awk '{print $1}' ${snpf2} > ${tn2}_1
+paste ${of1}.snp ${of1}.geno | fgrep -wf ${tn2}_1 - | cut -f 7 > ${tn2}_2
+
+echo -e 'IID\tn1240K\tp1240K\tnHO\tpHO' > ${of1}.missing.txt
+while read line; do iid=($(echo ${line} | cut -f 1))
+    K=($(grep -nw ${iid} ${of1}.ind | cut -d ':' -f 1))
+    tnum1=($(cut -c ${K} ${of1}.geno | awk '$1 != 9' | wc -l))
+    tnum2=($(cut -c ${K} ${tn2}_2 | awk '$1 != 9' | wc -l))
+    echo ${iid}" "${tnum1}" "${tnum2} | awk '{print $1,$2,$2/1233013,$3,$3/597573}' | sed s/" "/"\t"/g >> ${of1}.missing.txt
+done < ${of1}.ind
+
+gzip ${of1}.pileup
+
+rm ${tn1}_*; rm slurm-*
+
+
+
+#############################################################
+## 9. Generate the final eigenstrat file                  ##
+##    by merging Koken_EN and Koken_MLBA r2 data            ##
+##    I merged KKN089 and KKN091 as they are duplicates   ##
+#############################################################
+
+cd /data2/projects1/Koken/analysis/genotypes
+
+pt1=($(pwd)"/")
+fn1="/data2/projects1/Koken/analysis/genotypes/Koken_MLBA.qpAdm.1240K.241230"  
+fn2="/home/projects1/DataProcessing_MPI/analysis/genotypes/DataProcessing_MPI_batch17.1240K.r2"
+scf="/home/choongwon_jeong/bin/eigenstrat_sample_merge_rename_181223.py"
+
+of1="Koken.1240K.250304"
+tn1="temp1_"${of1}
+
+## Extract KKN089 and Koken_EN
+cns=""; while read cn; do
+    if [[ "$cns" == "" ]]; then cns=${cn}; else cns+=","${cn}; fi    
+done < <(grep -nE "Koken_EN|KKN089.A0101" ${fn1}.ind | cut -d : -f 1)
+cut -c ${cns} ${fn1}.geno | paste - ${fn2}.geno -d '' > ${tn1}_1.geno
+grep -E "Koken_EN|KKN089.A0101" ${fn1}.ind | cat - ${fn2}.ind > ${tn1}_1.ind
+cp ${fn1}.snp ${tn1}_1.snp
+
+## Merge KKN089 and KKN091 as they are duplicates
+echo -e "newIID\tIIDs" > ${tn1}_1
+echo -e "KKN091_merged\tKKN089.A0101,KKN091.A0101" >> ${tn1}_1
+python2 ${scf} ${tn1}_1 ${tn1}_2 ${tn1}_1
+
+## Update PIDs
+cp ${tn1}_2.geno ${of1}.geno
+cp ${fn1}.snp ${of1}.snp
+while read -r iid sex pid; do
+    pid=($(awk -v iid="$iid" '{if ($1 == iid) print $3}' ${fn1}.ind))
+    echo -e ${iid}"\t"${sex}"\t"${pid} >> ${of1}.ind
+done < ${tn1}_2.ind
+
+rm ${tn1}_*
+
+
+
+##########################################################
+## 10. Generate a HO data set for PCA             ##
+##########################################################
+
+cd /data2/projects1/Koken/analysis/genotypes
+
+pt1=($(pwd)"/")
+fn1="/data2/PubData/Human_1240K_genotypes/1240KHO.auto.250211"  ## master HumanOrigins data
+fn2s="/data2/projects1/Koken/analysis/genotypes/Koken.1240K.auto.250304"
+
+of1="Koken.PCA.1240KHO.250304"
+tn1="temp1_"${of1}
+
+genofs=""; indfs=""
+for fn2 in ${fn2s}; do genofs+=" "${fn2}".geno"; indfs+=" "${fn2}".ind"; done
+
+## Merge all 1240K data
+paste ${genofs} -d '' > ${tn1}_0.geno
+cat ${indfs} | awk '{OFS="\t"} {print $1,$2,$3}' > ${tn1}_0.ind
+fn2=($(echo ${fn2s} | awk '{print $1}'))
+cp ${fn2}.snp ${tn1}_0.snp
+
+awk '{print $1}' ${fn1}.snp > ${tn1}_1  ## Extract SNP IDs for HumanOrigins markers
+paste ${tn1}_0.snp ${tn1}_0.geno | fgrep -wf ${tn1}_1 - | awk '{print $7}' > ${tn1}_1.geno  ## Extract HumanOrigins markers
+paste ${tn1}_0.snp ${tn1}_0.geno | fgrep -wf ${tn1}_1 - | awk '{OFS="\t"} {print $1,$2,$3,$4,$5,$6}' > ${tn1}_1.snp
+
+paste ${fn1}.geno ${tn1}_1.geno -d '' > ${of1}.geno
+cp ${tn1}_1.snp ${of1}.snp
+cat ${fn1}.ind ${tn1}_0.ind | awk '{OFS="\t"} {print $1,$2,$3}' > ${of1}.ind
+cat ${fn1}.original.ind ${tn1}_0.ind | awk '{OFS="\t"} {print $1,$2,$3}' > ${of1}.original.ind
+
+rm ${tn1}_*
+
+
+
+##################################################################
+## 11. Run preliminary PCA for the new data set as a QC         ##
+##################################################################
+
+cd /data2/projects1/Koken/analysis
+mkdir -p ./PCA_250304/; cd ./PCA_250304/
+
+pt1=($(pwd)"/")
+fn1="/data2/projects1/Koken/analysis/genotypes/Koken.PCA.1240KHO.250304"
+fn2="/data1/PubData/Jeong2020Cell/analysis/PCA_201022/PCA_201022"
+of1="PCA_250304"
+tn1="temp1_"${of1}
+
+nset=($(ls ${fn2}_*.pops | wc -l))
+for K in $(seq 1 $nset); do cp ${fn2}_${K}.pops ${of1}_${K}.pops; done
+
+## Write down parameter files
+nset=($(ls ${of1}_*.pops | wc -l))
+for K in $(seq 1 $nset); do
+    of2=${of1}"_"${K}; parf=${of2}".par"
+    echo "genotypename: "${fn1}".geno" > ${parf}
+    echo "snpname: "${fn1}".snp" >> ${parf}
+    if [ "$K" -lt "$nset" ]; then
+        echo "indivname: "${fn1}".original.ind" >> ${parf}
+    else
+        echo "indivname: "${fn1}".ind" >> ${parf}
+    fi
+    echo "evecoutname: "${pt1}${of2}".evec" >> ${parf}
+    echo "evaloutname: "${pt1}${of2}".eval" >> ${parf}
+    echo "poplistname: "${pt1}${of2}".pops" >> ${parf}
+    echo -e "altnormstype: NO\nnumoutevec: 20\nnumoutlieriter: 0\nnumoutlierevec: 0" >> ${parf}
+    echo -e "outliersigmathresh: 6.0\nnumthreads: 8\nqtmode: 0\nlsqproject: YES" >> ${parf}
+done
+
+## Run smartpca
+for K in $(seq 1 $nset); do
+    of2=${of1}"_"${K}
+    sbatch -c 8 --mem 15000 --wrap="smartpca -p "${of2}".par > "${of2}".log"
+done
+
+## Reformat output and remove unnecessary files
+/home/choongwon_jeong/bin/eigenstrat_output_trimmer_160222.py ${of1} ${nset}
+rm ${of1}_*.log; rm slurm-*
+
+
+
+
+##############################################
+## 12. Y haplogroup assignment using yHaplo ##
+##     Use 1240K data                       ##
+##############################################
+
+cd /home/projects1/DataProcessing_MPI/analysis/Yhap/
+
+mkdir -p ./MPI_batch17_TF1.2_250304/; cd ./MPI_batch17_TF1.2_250304/
+
+pt1=($(pwd)"/")
+href="/home/References/Human/hs37d5.fa"
+posf="/opt/ohpc/pub/apps/yhaplo/2016-v1/input/ISOGG_chrY_cleanup_170802_hs37d5.list"
+snpf="/opt/ohpc/pub/apps/yhaplo/2016-v1/input/ISOGG_chrY_cleanup_170802.snp"
+dataf="/opt/ohpc/pub/apps/yhaplo/2016-v1/input/ISOGG_chrY_cleanup_170802.txt"
+py="/opt/ohpc/pub/apps/yhaplo/2016-v1/callHaplogroups.py"
+idf="../../genotypes/DataProcessing_MPI_batch17.1240K.r2.ind"
+of1="DataProcessing_MPI_batch17.yHaplo.250304"
+tn1="temp1_"${of1}
+## nmask=10
+
+## Generate pileup
+bam1s=""; iids=""
+while read iid; do
+    bam1=($(ls ../../../1240Kbam/${iid}/merged/*.q30.bam))
+    if [[ "$iids" == "" ]]; then bam1s+=${bam1}; iids+=${iid}
+    else bam1s+=" "${bam1}; iids+=","${iid}; fi
+done < <(awk '{if ($2 == "M") print $1}' ${idf})
+
+## Run samtools mpileup (ignore read group info using -R flag)
+CMD="samtools mpileup -B -R -q30 -Q30 -l "${posf}" -f "${href}" "${bam1s}" > "${tn1}"_1; "
+CMD+="cut -f 1 "${tn1}"_1 | sed s/'X'/'23'/g | sed s/'Y'/'24'/g | "
+CMD+="paste - "${tn1}"_1 | cut -f 1,3- > "${of1}".pileup; rm "${tn1}"_1"
+CMD+="; pileupCaller --majorityCall --singleStrandMode --sampleNames "${iids}" -f "${snpf}" -e "${tn1}"_1 < "${of1}".pileup"
+sbatch -c 8 --mem 10000 --wrap="$CMD"
+
+## Rename the output files
+cp ${tn1}_1.geno ${of1}.geno
+cp ${snpf} ${of1}.snp
+awk '$2 == "M"' ${idf} > ${of1}.ind
+
+## Change EIGENSTRAT format data into yHaplo input format
+/home/choongwon_jeong/bin/EIGENSTRAT_to_yhaplo_170629.py ${of1}
+
+/usr/bin/python2 ${py} --ancStopThresh 10 -i ${of1}.genos.txt -o ./output -c -hp -ds -dsd -as -asd
+## /projects1/users/jeong/bin/ISOGG_Yhap_tabulate_script_170802.py --in=${of1} --data=${dataf}
+
+cat ./*/haplogroups.${of1}.txt | sort -k1,1 | awk '{OFS="\t"} {if ($2 == $3) print $1,$4"("$2")"; else print $1,$4"("$2","$3")"}'
+
+rm slurm-*; rm ${tn1}_*
+
+
