@@ -1,0 +1,45 @@
+## For GLIMPSE2, I don't need to merge ligated and sampled files. All fields required are already in the one file.
+
+####################################
+## 1. Run ancIBD                                     ##
+####################################
+
+cd /data2/projects1/Koken/Koken_ML_1240K/analysis/ancIBD
+
+pt1=($(pwd)"/")
+
+scf=${pt1}"Run_ancIBD_250304.sh"
+inf0="/data2/projects1/Koken/Koken_ML_1240K/analysis/imputation2/ligate/Koken_EN.chr"
+fn1="Koken_EN"
+
+## Submit the jobs
+## It takes several minutes per one chromosome
+nchr=22
+nrun=3
+
+CMD1=${scf}" "${inf0}" "${pt1}" "${fn1}
+sbatch --array=1-${nchr}%${nrun} -c 8 --mem 15000 --wrap="$CMD1"
+
+## Summarize the results
+## It only takes less than one minute
+CMD2="ancIBD-summary --tsv "${pt1}"output_"${fn1}"/"${fn1}".ancIBD.ch --out "${pt1}"output_"${fn1}
+sbatch -c 8 --mem 15000 --wrap="$CMD2"
+
+rm slurm-*
+
+
+##########################################
+##  Save the following as "Run_ancIBD_250304.sh"  ## 
+
+#!/bin/bash
+
+inf0=$1
+path=$2
+fn1=$3
+ch=$SLURM_ARRAY_TASK_ID
+
+inf=${inf0}${ch}".ligated.vcf.gz"
+
+ancIBD-run --vcf ${inf} --out ${path}output_${fn1} --ch ${ch} \
+  --marker_path ${path}data/filters/snps_bcftools_ch${ch}.csv --map_path ${path}data/map/v51.1_1240k.snp \
+  --af_path ${path}data/afs/v51.1_1240k_AF_ch${ch}.tsv --prefix ${fn1}.ancIBD
