@@ -1,0 +1,273 @@
+#################################################################################################
+## 1. Compute genotype likelihoods using BCFtools and merge GLs of multiple individuals        ##
+##  compute GLs at all target individuals and all variant sites present in the reference panel ##
+#################################################################################################
+
+cd /data2/projects1/Koken/Koken_ML_1240K/analysis/
+mkdir -p imputation2/VCF/; cd imputation2/VCF/
+
+pt1=($(pwd)"/")
+tlistf="/home/projects1/DataProcessing_MPI/DataProcessing_MPI_batch17_list_TF1.2.txt"
+listf="/data2/projects1/Koken/Koken_ML_1240K/analysis/imputation2/Koken_EN_bams.list.txt"
+scf1=${pt1}"Calculate_genotype_likelihoods_ss_250228.sh"
+scf2=${pt1}"Merge_genotype_likelihoods_ss_250228.sh"
+
+gid="Koken_EN"
+mgl=${pt1}${gid}".merge.list.txt"  ## list file to merge 
+
+## Make a list file
+echo -e "Num\tIID\tBAM" > ${listf}
+n1=1; while read iid; do
+    inbam="/home/projects1/DataProcessing_MPI/BAM/"${iid}"/merged/"${iid}".L35.mapped.rmdup.q30.bam"
+    echo -e ${n1}"\t"${iid}"\t"${inbam} >> ${listf}
+    let n1+=1
+done < <(awk '{print $1}' ${tlistf})
+
+## Create a list of comma-separated index numbers to calcalate genotype likelihoods for each sample
+## This is a requirement for running the slurm job array
+idns=""
+while read idn; do 
+    if [[ $idns == "" ]]; then idns+=${idn}; else idns+=","${idn}; fi
+done < <(tail -n +2 ${listf} | awk '{print $1}')
+
+## Set the number of jobs to be run at a time
+nval=6
+
+## Create per individual directory
+while read iid; do
+    mkdir -p ${pt1}${iid}/
+done < <(tail -n +2 ${listf} | awk '{print $2}')
+
+## Run the slurm job array
+## I put strand info as the last parameter
+for strtag in ps ng all; do
+    sbatch --array=${idns}%${nval} -c 8 --mem 15000 --wrap=${scf1}" "${listf}" "${strtag}
+done
+
+## Merge GLs of different sites from the same individual
+## Extract GLs of C/T SNPs from negative strands, G/A SNPs from positive strands, and the rest from all
+nval=6
+sbatch --array=${idns}%${nval} -c 12 --mem 15000 --wrap=${scf2}" "${listf}
+
+## Merge GLs of multiple target individuals
+mgl0="/data2/PubData/Narasimhan2019Science/analysis/imputation/VCF/Narasimhan2019Science_120_450K_70.merge.list.txt"
+sf0="/data2/PubData/Narasimhan2019Science/analysis/imputation/VCF/Narasimhan2019Science_120_450K_70.samples.list.txt"
+mgl="/data2/projects1/Koken/Koken_ML_1240K/analysis/imputation2/VCF/Narasimhan2019Science_70_Koken.merge.list.txt"
+sf="/data2/projects1/Koken/Koken_ML_1240K/analysis/imputation2/VCF/Narasimhan2019Science_70_Koekn.samples.list.txt"
+grep -v "KKN" ${mgl0} > ${mgl}
+grep -v "KKN" ${sf0} > ${sf}
+while read iid; do echo ${pt1}${iid}"/"${iid}".vcf.gz" >> ${mgl}; done < <(tail -n +2 ${listf} | awk '{print $2}')
+tail -n +2 ${listf} | awk '{print $2}' >> ${sf}
+for chr in {1..22}; do
+    mgf=${pt1}${gid}".chr"${chr}".merged.vcf.gz"
+    CMD="bcftools merge --force-samples -m none -r "${chr}" -Ou -l "${mgl}" | "
+    CMD+="bcftools reheader -s "${sf}" -o "${mgf}"; "
+    CMD+="bcftools index -f "${mgf}
+    sbatch -c 12 --mem 15000 --wrap="$CMD"
+done
+
+rm slurm-*
+
+
+##############################################################
+## Save the following script as "Calculate_genotype_likelihoods_ss_250228.sh" ##
+
+#/bin/bash
+
+pt1=($(pwd)"/")
+listf=$1
+strtag=$2
+inum=$SLURM_ARRAY_TASK_ID
+
+iid=($(awk -v inum="$inum" '{if ($1 == inum) print $2}' ${listf}))
+inbam0=($(awk -v inum="$inum" '{if ($1 == inum) print $3}' ${listf}))
+if [[ "$strtag" == "ng" ]]; then
+    inbam=($(echo ${inbam0} | sed 's/bam/ng.bam/g'))
+    samtools view -bh -f 0x0010 -o ${inbam} ${inbam0}
+    samtools index ${inbam}
+elif [[ "$strtag" == "ps" ]]; then
+    inbam=($(echo ${inbam0} | sed 's/bam/ps.bam/g'))
+    samtools view -bh -F 0x0010 -o ${inbam} ${inbam0}
+    samtools index ${inbam}
+else
+    inbam=${inbam0}
+fi
+
+of=${pt1}${iid}"/"${iid}"."${strtag}".vcf.gz"
+
+reff="/home/References/Human/hs37d5.fa"
+refv="/home/References/1KGP3_v5b/GLIMPSE/1000GP.biallelic.sites.vcf.gz"
+reft="/home/References/1KGP3_v5b/GLIMPSE/1000GP.biallelic.sites.tsv.gz"
+
+bcftools mpileup -f ${reff} -I -E -a 'FORMAT/DP' -T ${refv} ${inbam} -Ou | \
+bcftools call -Aim -C alleles -T ${reft} -Oz -o ${of}
+bcftools index -f ${of}
+
+
+###########################################################
+## Save the following script as "Merge_genotype_likelihoods_ss_250103.sh" ##
+
+#/bin/bash
+
+pt1=($(pwd)"/")
+listf=$1
+inum=$SLURM_ARRAY_TASK_ID
+
+iid=($(awk -v inum="$inum" '{if ($1 == inum) print $2}' ${listf}))
+tn1=${pt1}${iid}
+
+bcftools view -i '(REF="C" && ALT="T") || (REF="T" && ALT="C")' -Oz -o ${tn1}_ng.vcf.gz ${pt1}${iid}/${iid}.ng.vcf.gz; bcftools index ${tn1}_ng.vcf.gz
+bcftools view -i '(REF="A" && ALT="G") || (REF="G" && ALT="A")' -Oz -o ${tn1}_ps.vcf.gz ${pt1}${iid}/${iid}.ps.vcf.gz; bcftools index ${tn1}_ps.vcf.gz
+bcftools view -i '(REF="C" && ALT="A") || (REF="A" && ALT="C") || (REF="C" && ALT="G") || (REF="G" && ALT="C") || (REF="A" && ALT="T") || (REF="T" && ALT="A") || (REF="T" && ALT="G") || (REF="G" && ALT="T")' -Oz -o ${tn1}_all.vcf.gz ${pt1}${iid}/${iid}.all.vcf.gz
+bcftools index ${tn1}_all.vcf.gz
+bcftools concat -a -Oz -o ${pt1}${iid}/${iid}.vcf.gz ${tn1}_ng.vcf.gz ${tn1}_ps.vcf.gz ${tn1}_all.vcf.gz 
+bcftools index ${pt1}${iid}/${iid}.vcf.gz
+
+rm ${pt1}${iid}_*
+
+
+
+
+###############################################################################
+## 2. Run GLIMPSE                                                            ##
+##  This includes three steps, to chunk, impute, and ligate                  ##
+##  If the phased information is required, sampling step should be performed ##
+###############################################################################
+
+cd /data2/projects1/Koken/Koken_ML_1240K/analysis/imputation2/
+
+pt1=($(pwd)"/")
+gid="Koken_EN"
+listf="/data2/projects1/Koken/Koken_ML_1240K/analysis/imputation2/VCF/Narasimhan2019Science_70_Koekn.samples.list.txt"
+
+ref0="/home/References/1KGP3_v5b/GLIMPSE/1000GP.chr"
+map0="/opt/ohpc/pub/apps/GLIMPSE2/maps/genetic_maps.b37/chr"
+mgl="/data2/projects1/Koken/Koken_ML_1240K/analysis/imputation2/VCF/Narasimhan2019Science_70_Koken.merge.list.txt"
+scf0=${pt1}"Create_binary_reference_panel_250302.sh"
+scf=${pt1}"Run_imputation_250302.sh"
+nchr=22
+
+cf0=${pt1}"binary_reference/"${gid}".chunk.chr"  ## chunk file
+ligl0=${pt1}${gid}".imputed.chr"  ## imputed file list for ligation
+concf=${pt1}${gid}".concat.txt"  ## ligated file list to concatenate per chromosome files
+of0=${pt1}${gid}".imputed.vcf.gz"
+of1=${pt1}${gid}".sampled.vcf.gz"
+
+## Split the genome into chunks
+## This is to speed up the process
+## It doesn't need to be repeated
+mkdir -p binary_reference
+
+for chr in $(seq 1 ${nchr}); do
+    refv=${ref0}${chr}".biallelic.sites.vcf.gz"
+    mapf=${map0}${chr}".b37.gmap.gz"
+    chunkf=${cf0}${chr}
+    CMD="GLIMPSE2_chunk_static --input "${refv}" --region "${chr}" --sequential"
+    CMD+=" --output "${chunkf}" --map "${mapf}
+    sbatch -c 2 --mem 2500 --wrap="$CMD"
+done
+
+## Make binary reference panel
+for chr in $(seq 1 ${nchr}); do
+    chunkf=${cf0}${chr}
+    bref0=${pt1}"binary_reference/1000GP.chr"${chr}".biallelic"
+    cn=($(tail -1 ${chunkf} | awk '{print $1}'))
+    cns=""
+    for cn1 in $(seq 0 $cn); do
+        if [[ "$cns" == "" ]]; then cns+=${cn1}; else cns+=","${cn1}; fi
+    done
+    nval=4
+
+    CMD=${scf0}" "${chr}" "${gid}" "${chunkf}" "${bref0}
+    sbatch --array=${cns}%${nval} -c 2 --mem 2500 --wrap="$CMD"
+done
+
+## Run imputation of merged vcf 
+mkdir -p ${pt1}impute/
+for chr in $(seq 1 ${nchr}); do
+    mkdir -p ${pt1}impute/chr${chr}/
+    chunkf=${cf0}${chr}
+    bref0=${pt1}"binary_reference/1000GP.chr"${chr}".biallelic"
+    cn=($(tail -1 ${chunkf} | awk '{print $1}'))
+    cns=""
+    for cn1 in $(seq 0 $cn); do
+        if [[ "$cns" == "" ]]; then cns+=${cn1}; else cns+=","${cn1}; fi
+    done
+    nval=2
+
+    CMD=${scf}" "${chr}" "${gid}" "${chunkf}" "${bref0}
+    sbatch --array=${cns}%${nval} -c 2 --mem 2500 --wrap="$CMD"
+done
+
+## Ligate the chunks together 
+mkdir -p ${pt1}ligate/
+for chr in $(seq 1 ${nchr}); do
+    ligl=${ligl0}${chr}
+    ls ${pt1}impute/chr${chr}/${gid}*${chr}.*.vcf.gz > ${ligl}
+    ligf=${pt1}"ligate/"${gid}".chr"${chr}".ligated.vcf"
+    
+    CMD="GLIMPSE2_ligate_static --input "${ligl}" --output "${ligf}"; "
+    CMD+="bgzip "${ligf}"; bcftools index -f "${ligf}".gz"
+    sbatch -c 8 --mem 10000 --wrap="$CMD"
+done
+
+## Concatenate per chromosome files 
+## I didn't do this part because ancIBD requires per chromosome files
+ls -v ${pt1}ligate/${gid}*vcf.gz > ${concf}
+CMD="bcftools concat -f "${concf}" -Oz -o "${of0}"; "
+CMD+="bcftools index "${of0}
+sbatch -c 12 --mem 15000 --wrap="$CMD"
+
+rm ${cf0}*
+rm ${sf}
+rm ${ligl0}*
+rm slurm-*
+
+
+#############################################################
+## Save the following script as "Create_binary_reference_panel_250302.sh" ##
+
+#!/bin/bash
+
+pt1=($(pwd)"/")
+chr=$1
+gid=$2
+chunkf=$3
+of=$4
+inum=$SLURM_ARRAY_TASK_ID
+
+ID=($(printf "%02d" $inum))
+irg=($(awk -v inum="$inum" '{if ($1 == inum) print $3}' ${chunkf}))
+org=($(awk -v inum="$inum" '{if ($1 == inum) print $4}' ${chunkf}))
+
+ref="/home/References/1KGP3_v5b/GLIMPSE/1000GP.chr"${chr}".biallelic.bcf"
+map="/opt/ohpc/pub/apps/GLIMPSE/maps/genetic_maps.b37/chr"${chr}".b37.gmap.gz"
+
+GLIMPSE2_split_reference_static --reference ${ref} --map ${map} --input-region ${irg} --output-region ${org} --output ${of} 
+
+
+#############################################################
+## Save the following script as "Run_imputation_250302.sh" ##
+
+#!/bin/bash
+
+pt1=($(pwd)"/")
+chr=$1
+gid=$2
+chunkf=$3
+bref0=$4
+inum=$SLURM_ARRAY_TASK_ID
+
+ID=($(printf "%02d" $inum))
+irg=($(awk -v inum="$inum" '{if ($1 == inum) print $3}' ${chunkf}))
+org=($(awk -v inum="$inum" '{if ($1 == inum) print $4}' ${chunkf}))
+regs=$(echo ${irg} | cut -d ":" -f 2 | cut -d "-" -f1)
+rege=$(echo ${irg} | cut -d ":" -f 2 | cut -d "-" -f2)
+
+bref=${bref0}"_"${chr}"_"${regs}"_"${rege}".bin"
+invcf=${pt1}"VCF/"${gid}".chr"${chr}".merged.vcf.gz"
+of=${pt1}"impute/chr"${chr}"/"${gid}".chr"${chr}".imputed."${ID}".vcf"
+
+GLIMPSE2_phase_static --input-gl ${invcf} --reference ${bref} --output ${of}
+bgzip ${of}
+bcftools index -f ${of}.gz
