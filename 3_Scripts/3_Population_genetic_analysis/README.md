@@ -1,0 +1,1 @@
+This folder contains scripts for the methods section "Principal components analysis", "f-statistics", "Genetic admixture modeling with qpWave and qpAdm", and "Admixture dating with DATES" in the paper.
